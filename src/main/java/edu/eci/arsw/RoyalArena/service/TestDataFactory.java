@@ -33,6 +33,7 @@ public class TestDataFactory {
                 .damage(damage).health(health).isAerial(false)
                 .attackSpeed(attackSpeed).movementSpeed(moveSpeed)
                 .attackRange(range).target("GROUND").unitCount(count)
+                .deploymentType("OWN_SIDE") 
                 .build();
     }
 
@@ -40,6 +41,7 @@ public class TestDataFactory {
         return CardSnapshot.builder()
                 .cardId(id).name(name).type("SPELL").elixirCost(elixir)
                 .damage(damage).effectRadius(radius)
+                .deploymentType("ANYWHERE") 
                 .build();
     }
 }
