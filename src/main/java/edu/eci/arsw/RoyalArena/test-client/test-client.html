@@ -132,12 +132,27 @@
             if (!stompClient || !stompClient.connected) { log('⚠️ Conecta el WebSocket primero'); return; }
 
             currentMatchId = matchId;
+
+            // Suscripción al estado de la partida
             stompClient.subscribe('/topic/match/' + matchId, function(message) {
                 const snapshot = JSON.parse(message.body);
                 lastSnapshot = snapshot;
                 render(snapshot);
             });
-            log('👀 Suscrito a la partida ' + matchId);
+
+            // Suscripción a errores del Jugador 1
+            stompClient.subscribe('/topic/match/' + matchId + '/errors/1', function(message) {
+                const err = JSON.parse(message.body);
+                log('🚫 [Jugador 1] Carta ' + err.cardId + ' rechazada: ' + err.reason);
+            });
+
+            // Suscripción a errores del Jugador 2
+            stompClient.subscribe('/topic/match/' + matchId + '/errors/2', function(message) {
+                const err = JSON.parse(message.body);
+                log('🚫 [Jugador 2] Carta ' + err.cardId + ' rechazada: ' + err.reason);
+            });
+
+            log('👀 Suscrito a la partida ' + matchId + ' (estado + errores)');
         }
 
         function playCard() {

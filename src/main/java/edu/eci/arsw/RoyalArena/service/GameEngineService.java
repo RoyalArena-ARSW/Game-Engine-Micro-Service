@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import edu.eci.arsw.RoyalArena.dto.ActionErrorDTO;
 import edu.eci.arsw.RoyalArena.dto.MatchSnapshotDTO;
 import edu.eci.arsw.RoyalArena.dto.PlayerSnapshotDTO;
 import edu.eci.arsw.RoyalArena.dto.TowerSnapshotDTO;
@@ -213,20 +214,44 @@ public class GameEngineService {
     // ==================== Fases del tick ====================
 
     private void processPendingActions(GameMatch match) {
-        PlayerAction action;
-        while ((action = match.getPendingActions().poll()) != null) {
+        PlayerAction polled;
+        while ((polled = match.getPendingActions().poll()) != null) {
+            final PlayerAction action = polled;
             PlayerState player = match.findPlayer(action.playerId());
             if (player == null) continue;
 
             CardSnapshot card = player.findCardInDeck(action.cardId());
-            if (card == null) continue;
-
-            if (!isValidDeployment(player.getTeam(), action.position(), card)) {
-                log.debug("Invalid deployment position {} for card {} (type {})",
-                        action.position(), card.getName(), card.getDeploymentType());
+            if (card == null) {
+                sendActionError(match, action.playerId(), action.cardId(),
+                        "La carta no pertenece a tu mazo");
                 continue;
             }
 
+            // ¿Está la carta en la mano?
+            boolean inHand = player.getHand().stream()
+                    .anyMatch(c -> c.getCardId().equals(action.cardId()));
+            if (!inHand) {
+                sendActionError(match, action.playerId(), action.cardId(),
+                        "La carta no está en tu mano en este momento");
+                continue;
+            }
+
+            // ¿Posición de despliegue válida?
+            if (!isValidDeployment(player.getTeam(), action.position(), card)) {
+                sendActionError(match, action.playerId(), action.cardId(),
+                        "No puedes desplegar esa carta en esa posición");
+                continue;
+            }
+
+            // ¿Suficiente elixir?
+            if (player.getElixir() < card.getElixirCost()) {
+                sendActionError(match, action.playerId(), action.cardId(),
+                        "Elixir insuficiente (tienes " + String.format("%.1f", player.getElixir())
+                                + ", necesitas " + card.getElixirCost() + ")");
+                continue;
+            }
+
+            // Todo válido: jugar la carta
             if (!player.tryPlayCard(action.cardId())) {
                 log.debug("Player {} can't play card {} (elixir or not in hand)",
                         action.playerId(), action.cardId());
@@ -235,6 +260,16 @@ public class GameEngineService {
 
             deployCard(match, player, card, action.position());
         }
+    }
+
+    /**
+     * Envía un mensaje de error a un jugador específico por WebSocket.
+     */
+    private void sendActionError(GameMatch match, Long playerId, Long cardId, String reason) {
+        log.debug("Action rejected for player {} card {}: {}", playerId, cardId, reason);
+        messagingTemplate.convertAndSend(
+                "/topic/match/" + match.getMatchId() + "/errors/" + playerId,
+                new ActionErrorDTO(playerId, cardId, reason));
     }
 
     /**
