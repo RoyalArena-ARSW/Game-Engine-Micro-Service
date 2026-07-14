@@ -81,6 +81,12 @@
 
         // Escala: el tablero es 18x32 tiles, el canvas 360x640 px → 20px por tile
         const TILE = 20;
+        const BOARD_HEIGHT = 32; 
+
+
+        function flipY(gameY) {
+            return (BOARD_HEIGHT - gameY) * TILE;
+        }
 
         function log(msg) {
             const el = document.getElementById('log');
@@ -166,35 +172,39 @@
 
             // Río (filas 15-17)
             ctx.fillStyle = '#1e3a5f';
-            ctx.fillRect(0, 15 * TILE, canvas.width, 2 * TILE);
+            ctx.fillRect(0, flipY(17), canvas.width, 2 * TILE);
 
             // Puentes
             ctx.fillStyle = '#6b4423';
-            ctx.fillRect(3 * TILE, 15 * TILE, TILE, 2 * TILE);
-            ctx.fillRect(14 * TILE, 15 * TILE, TILE, 2 * TILE);
+            ctx.fillRect(3 * TILE, flipY(17), TILE, 2 * TILE);
+            ctx.fillRect(14 * TILE, flipY(17), TILE, 2 * TILE);
 
             // Torres
             s.towers.forEach(t => {
                 if (t.destroyed) return;
                 ctx.fillStyle = t.team === 'TEAM_A' ? '#3b82f6' : '#ef4444';
                 const size = t.type === 'KING' ? 24 : 18;
-                ctx.fillRect(t.x * TILE - size/2, t.y * TILE - size/2, size, size);
+                const cx = t.x * TILE;
+                const cy = flipY(t.y);
+                ctx.fillRect(cx - size/2, cy - size/2, size, size);
                 // Barra de vida
                 const hpRatio = t.currentHealth / t.maxHealth;
                 ctx.fillStyle = '#22c55e';
-                ctx.fillRect(t.x * TILE - size/2, t.y * TILE - size/2 - 6, size * hpRatio, 3);
+                ctx.fillRect(cx - size/2, cy - size/2 - 6, size * hpRatio, 3);
             });
 
             // Unidades
             s.units.forEach(u => {
                 ctx.fillStyle = u.team === 'TEAM_A' ? '#60a5fa' : '#f87171';
+                const cx = u.x * TILE;
+                const cy = flipY(u.y);
                 ctx.beginPath();
-                ctx.arc(u.x * TILE, u.y * TILE, 6, 0, Math.PI * 2);
+                ctx.arc(cx, cy, 6, 0, Math.PI * 2);
                 ctx.fill();
                 // Barra de vida
                 const hpRatio = u.currentHealth / u.maxHealth;
                 ctx.fillStyle = '#22c55e';
-                ctx.fillRect(u.x * TILE - 8, u.y * TILE - 12, 16 * hpRatio, 2);
+                ctx.fillRect(cx - 8, cy - 12, 16 * hpRatio, 2);
             });
         }
     </script>
