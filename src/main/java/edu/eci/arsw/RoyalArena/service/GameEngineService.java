@@ -221,8 +221,9 @@ public class GameEngineService {
             CardSnapshot card = player.findCardInDeck(action.cardId());
             if (card == null) continue;
 
-            if (!isValidDeployment(player.getTeam(), action.position())) {
-                log.debug("Invalid deployment position {} for player {}", action.position(), action.playerId());
+            if (!isValidDeployment(player.getTeam(), action.position(), card)) {
+                log.debug("Invalid deployment position {} for card {} (type {})",
+                        action.position(), card.getName(), card.getDeploymentType());
                 continue;
             }
 
@@ -237,14 +238,25 @@ public class GameEngineService {
     }
 
     /**
-     * Regla de despliegue: solo en tu propia mitad del tablero.
-     * TEAM_A abajo (y < 15), TEAM_B arriba (y > 17). Sobre el río no.
+     * Valida si una carta puede desplegarse en la posición dada.
+     * - Fuera del tablero: nunca.
+     * - Cartas ANYWHERE (hechizos): en cualquier parte del tablero.
+     * - Cartas OWN_SIDE (tropas, edificios): solo en la mitad propia,
+     *   sin cruzar el río.
      */
-    private boolean isValidDeployment(Team team, Position pos) {
+    private boolean isValidDeployment(Team team, Position pos, CardSnapshot card) {
+        // Fuera de los límites del tablero: siempre inválido
         if (pos.x() < 0 || pos.x() > GameConstants.BOARD_WIDTH
                 || pos.y() < 0 || pos.y() > GameConstants.BOARD_HEIGHT) {
             return false;
         }
+
+        // Los hechizos (ANYWHERE) se pueden lanzar en cualquier parte
+        if ("ANYWHERE".equals(card.getDeploymentType())) {
+            return true;
+        }
+
+        // Las tropas y edificios (OWN_SIDE) solo en su mitad
         if (team == Team.TEAM_A) {
             return pos.y() < GameConstants.RIVER_Y_MIN;
         }

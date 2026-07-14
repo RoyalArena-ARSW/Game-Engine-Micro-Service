@@ -36,6 +36,7 @@ public class CardSnapshot {
     private Double attackRange;       // tiles
     private String target;            // GROUND, AIR_AND_GROUND, BUILDINGS_ONLY
     private Integer unitCount;        // cuántas unidades despliega (Skeletons=4)
+    private String deploymentType;    //OWN_SIDE o ANYWHERE. Define dónde se puede desplegar la carta. 
 
     // ----- Stats de hechizos -----
     private Double effectRadius;
