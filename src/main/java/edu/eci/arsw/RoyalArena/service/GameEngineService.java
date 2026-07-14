@@ -1,5 +1,7 @@
 package edu.eci.arsw.RoyalArena.service;
 
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -9,6 +11,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -66,6 +69,9 @@ public class GameEngineService {
     private final Map<String, GameMatch> activeMatches = new ConcurrentHashMap<>();
     private final Map<String, ScheduledFuture<?>> matchTasks = new ConcurrentHashMap<>();
 
+    private final SimpMessagingTemplate messagingTemplate;
+
+
     private ScheduledExecutorService scheduler;
 
     @Value("${game.engine.thread-pool-size:4}")
@@ -76,6 +82,10 @@ public class GameEngineService {
 
     @Value("${game.match.duration-seconds:180}")
     private double matchDurationSeconds;
+
+    public GameEngineService(SimpMessagingTemplate messagingTemplate) {
+        this.messagingTemplate = messagingTemplate;
+    }
 
     @PostConstruct
     public void init() {
@@ -186,6 +196,18 @@ public class GameEngineService {
         // 6. Descontar tiempo y chequear condiciones de fin
         match.setRemainingSeconds(match.getRemainingSeconds() - deltaSeconds);
         checkVictoryConditions(match);
+
+        broadcastState(match);
+    }
+
+    /**
+     * Empuja el snapshot actual a todos los clientes suscritos a
+     * /topic/match/{matchId}. Se llama al final de cada tick.
+     */
+    private void broadcastState(GameMatch match) {
+        MatchSnapshotDTO snapshot = buildSnapshot(match.getMatchId());
+        messagingTemplate.convertAndSend(
+                "/topic/match/" + match.getMatchId(), snapshot);
     }
 
     // ==================== Fases del tick ====================
@@ -402,6 +424,7 @@ public class GameEngineService {
         // Fase 4: aquí se publica MatchFinishedEvent a RabbitMQ.
         // La limpieza del map se hace diferida para que los clientes
         // puedan consultar el resultado final (mejora: scheduler de limpieza).
+        broadcastState(match);
     }
 
     // ==================== Snapshots para clientes ====================

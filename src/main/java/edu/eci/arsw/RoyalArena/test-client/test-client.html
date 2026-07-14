@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Royal Arena - Cliente de Prueba</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <style>
+        body { font-family: sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+        .container { display: flex; gap: 20px; }
+        canvas { background: #16213e; border: 2px solid #0f3460; }
+        .panel { flex: 1; }
+        button { background: #0f3460; color: #eee; border: none; padding: 8px 16px; margin: 4px; cursor: pointer; border-radius: 4px; }
+        button:hover { background: #533483; }
+        input { padding: 6px; margin: 4px; width: 60px; background: #16213e; color: #eee; border: 1px solid #0f3460; }
+        .info { background: #16213e; padding: 12px; border-radius: 4px; margin: 8px 0; }
+        .status { font-weight: bold; }
+        .connected { color: #4ade80; }
+        .disconnected { color: #f87171; }
+        #log { height: 150px; overflow-y: auto; background: #0d0d1a; padding: 8px; font-size: 12px; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <h1>🏰 Royal Arena — Cliente de Prueba</h1>
+
+    <div class="info">
+        <span>Estado: </span><span id="connStatus" class="status disconnected">Desconectado</span>
+        <br>
+        <button onclick="connect()">1. Conectar WebSocket</button>
+        <button onclick="createMatch()">2. Crear partida de prueba</button>
+        <input type="text" id="matchIdInput" placeholder="matchId" style="width:280px">
+        <button onclick="subscribe()">3. Suscribirse a la partida</button>
+    </div>
+
+    <div class="container">
+        <div>
+            <canvas id="board" width="360" height="640"></canvas>
+        </div>
+        <div class="panel">
+            <div class="info">
+                <div class="status">⏱️ Tiempo: <span id="time">-</span>s</div>
+                <div class="status">Estado partida: <span id="matchStatus">-</span></div>
+                <div class="status">🏆 Ganador: <span id="winner">-</span></div>
+            </div>
+
+            <div class="info">
+                <h3>Jugar carta</h3>
+                <label>Jugador:</label>
+                <select id="playerSelect" style="background:#16213e;color:#eee;padding:6px;">
+                    <option value="1">Jugador 1 (TEAM_A, abajo)</option>
+                    <option value="2">Jugador 2 (TEAM_B, arriba)</option>
+                </select>
+                <br>
+                <label>Carta ID:</label><input type="number" id="cardId" value="1">
+                <label>X:</label><input type="number" id="posX" value="9">
+                <label>Y:</label><input type="number" id="posY" value="10">
+                <br>
+                <button onclick="playCard()">▶️ Jugar carta</button>
+                <p style="font-size:12px;color:#888;">Tip: TEAM_A juega con Y &lt; 15, TEAM_B con Y &gt; 17.</p>
+            </div>
+
+            <div class="info">
+                <h3>Manos actuales</h3>
+                <div id="hands" style="font-size:13px;"></div>
+            </div>
+
+            <div class="info">
+                <h3>Log</h3>
+                <div id="log"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let stompClient = null;
+        let currentMatchId = null;
+        let lastSnapshot = null;
+
+        const canvas = document.getElementById('board');
+        const ctx = canvas.getContext('2d');
+
+        // Escala: el tablero es 18x32 tiles, el canvas 360x640 px → 20px por tile
+        const TILE = 20;
+
+        function log(msg) {
+            const el = document.getElementById('log');
+            el.innerHTML += `<div>${new Date().toLocaleTimeString()} — ${msg}</div>`;
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function connect() {
+            const socket = new SockJS('http://localhost:8084/ws-game');
+            stompClient = Stomp.over(socket);
+            stompClient.debug = null; // silenciar logs internos de STOMP
+
+            stompClient.connect({}, function(frame) {
+                document.getElementById('connStatus').textContent = 'Conectado';
+                document.getElementById('connStatus').className = 'status connected';
+                log('✅ WebSocket conectado');
+            }, function(error) {
+                document.getElementById('connStatus').textContent = 'Error';
+                document.getElementById('connStatus').className = 'status disconnected';
+                log('❌ Error de conexión: ' + error);
+            });
+        }
+
+        async function createMatch() {
+            try {
+                const res = await fetch('http://localhost:8084/api/games/test-match', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ userA: 1, userB: 2 })
+                });
+                const data = await res.json();
+                currentMatchId = data.matchId;
+                document.getElementById('matchIdInput').value = currentMatchId;
+                log('🎮 Partida creada: ' + currentMatchId);
+            } catch (e) {
+                log('❌ Error creando partida: ' + e.message);
+            }
+        }
+
+        function subscribe() {
+            const matchId = document.getElementById('matchIdInput').value.trim();
+            if (!matchId) { log('⚠️ Ingresa un matchId'); return; }
+            if (!stompClient || !stompClient.connected) { log('⚠️ Conecta el WebSocket primero'); return; }
+
+            currentMatchId = matchId;
+            stompClient.subscribe('/topic/match/' + matchId, function(message) {
+                const snapshot = JSON.parse(message.body);
+                lastSnapshot = snapshot;
+                render(snapshot);
+            });
+            log('👀 Suscrito a la partida ' + matchId);
+        }
+
+        function playCard() {
+            if (!stompClient || !stompClient.connected) { log('⚠️ Conecta primero'); return; }
+            if (!currentMatchId) { log('⚠️ Suscríbete a una partida primero'); return; }
+
+            const msg = {
+                playerId: parseInt(document.getElementById('playerSelect').value),
+                cardId: parseInt(document.getElementById('cardId').value),
+                x: parseFloat(document.getElementById('posX').value),
+                y: parseFloat(document.getElementById('posY').value)
+            };
+            stompClient.send('/app/match/' + currentMatchId + '/play', {}, JSON.stringify(msg));
+            log(`▶️ Jugador ${msg.playerId} juega carta ${msg.cardId} en (${msg.x}, ${msg.y})`);
+        }
+
+        function render(s) {
+            // Info de texto
+            document.getElementById('time').textContent = s.remainingSeconds.toFixed(1);
+            document.getElementById('matchStatus').textContent = s.status;
+            document.getElementById('winner').textContent = s.winner || '-';
+
+            // Manos
+            let handsHtml = '';
+            s.players.forEach(p => {
+                handsHtml += `<b>${p.team}</b> (elixir: ${p.elixir.toFixed(1)}): mano [${p.handCardIds.join(', ')}], próxima: ${p.nextCardId}<br>`;
+            });
+            document.getElementById('hands').innerHTML = handsHtml;
+
+            // Dibujar tablero
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Río (filas 15-17)
+            ctx.fillStyle = '#1e3a5f';
+            ctx.fillRect(0, 15 * TILE, canvas.width, 2 * TILE);
+
+            // Puentes
+            ctx.fillStyle = '#6b4423';
+            ctx.fillRect(3 * TILE, 15 * TILE, TILE, 2 * TILE);
+            ctx.fillRect(14 * TILE, 15 * TILE, TILE, 2 * TILE);
+
+            // Torres
+            s.towers.forEach(t => {
+                if (t.destroyed) return;
+                ctx.fillStyle = t.team === 'TEAM_A' ? '#3b82f6' : '#ef4444';
+                const size = t.type === 'KING' ? 24 : 18;
+                ctx.fillRect(t.x * TILE - size/2, t.y * TILE - size/2, size, size);
+                // Barra de vida
+                const hpRatio = t.currentHealth / t.maxHealth;
+                ctx.fillStyle = '#22c55e';
+                ctx.fillRect(t.x * TILE - size/2, t.y * TILE - size/2 - 6, size * hpRatio, 3);
+            });
+
+            // Unidades
+            s.units.forEach(u => {
+                ctx.fillStyle = u.team === 'TEAM_A' ? '#60a5fa' : '#f87171';
+                ctx.beginPath();
+                ctx.arc(u.x * TILE, u.y * TILE, 6, 0, Math.PI * 2);
+                ctx.fill();
+                // Barra de vida
+                const hpRatio = u.currentHealth / u.maxHealth;
+                ctx.fillStyle = '#22c55e';
+                ctx.fillRect(u.x * TILE - 8, u.y * TILE - 12, 16 * hpRatio, 2);
+            });
+        }
+    </script>
+</body>
+</html>
