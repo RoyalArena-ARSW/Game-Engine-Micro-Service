@@ -31,6 +31,20 @@ public final class GameConstants {
     public static final double TOWER_ATTACK_RANGE = 7.5;
     public static final double TOWER_ATTACK_SPEED_SECONDS = 0.8;
 
+    // ============ Tamaño de obstáculos (radio en tiles) ============
+    /** Radio que ocupa la torre del rey en el tablero. */
+    public static final double KING_TOWER_RADIUS = 2.0;
+    /** Radio que ocupan las torres princesa. */
+    public static final double PRINCESS_TOWER_RADIUS = 1.5;
+    /** Radio de un edificio desplegado (Cannon, etc.). */
+    public static final double BUILDING_RADIUS = 1.0;
+
+    // ============ Colisiones entre unidades ============
+    /** Radio de "cuerpo" de una unidad, para la separación. */
+    public static final double UNIT_RADIUS = 0.4;
+    /** Cuánto se corrige el solapamiento por tick (0-1). Amortigua el empuje. */
+    public static final double SEPARATION_STRENGTH = 0.5;
+    
     // ============ Posiciones de torres (TEAM_A abajo, TEAM_B arriba) ============
     public static final double KING_A_X = 9.0,  KING_A_Y = 2.5;
     public static final double PRINCESS_A_LEFT_X = 3.5,  PRINCESS_A_Y = 6.5;
