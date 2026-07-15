@@ -27,22 +27,25 @@ public class AStarPathfinder {
     private record OpenEntry(Cell cell, double fScore) { }
 
     /**
-     * Calcula el camino más corto de start a goal. Devuelve la lista de celdas
-     * (incluyendo start y goal), o una lista vacía si no hay camino.
+     * Calcula el camino más corto de start a goal, rodeando el terreno y los
+     * obstáculos dinámicos.
+     *
+     * @param exemptObstacleId obstáculo que NO cuenta como bloqueo (el objetivo
+     *                         de la unidad: si va a atacar una torre, esa torre
+     *                         no debe bloquearle la ruta hacia ella).
      */
-    public List<Cell> findPath(GameGrid grid, Cell start, Cell goal) {
-        // Si el destino cae sobre una celda no transitable (raro: solo si el
-        // objetivo está sobre agua), buscamos la celda transitable más cercana.
-        Cell target = grid.isWalkable(goal.col(), goal.row())
+    public List<Cell> findPath(GameGrid grid, DynamicObstacles obstacles,
+                                Cell start, Cell goal, String exemptObstacleId) {
+        Cell target = isFree(grid, obstacles, goal, exemptObstacleId)
                 ? goal
-                : nearestWalkable(grid, goal);
+                : nearestFree(grid, obstacles, goal, exemptObstacleId);
         if (target == null) {
             return List.of();
         }
 
-        Map<Cell, Double> gScore = new HashMap<>();   // costo real conocido a cada celda
-        Map<Cell, Cell> cameFrom = new HashMap<>();    // de dónde vengo (para reconstruir)
-        Set<Cell> closed = new HashSet<>();            // celdas ya procesadas
+        Map<Cell, Double> gScore = new HashMap<>();
+        Map<Cell, Cell> cameFrom = new HashMap<>();
+        Set<Cell> closed = new HashSet<>();
 
         gScore.put(start, 0.0);
         PriorityQueue<OpenEntry> open =
@@ -55,27 +58,88 @@ public class AStarPathfinder {
             if (current.equals(target)) {
                 return reconstructPath(cameFrom, current);
             }
-
-            // Si ya la procesamos (entrada obsoleta en la cola), la saltamos.
             if (!closed.add(current)) {
                 continue;
             }
 
-            for (Cell neighbor : walkableNeighbors(grid, current)) {
+            for (Cell neighbor : freeNeighbors(grid, obstacles, current, exemptObstacleId)) {
                 if (closed.contains(neighbor)) {
                     continue;
                 }
                 double tentativeG = gScore.get(current) + moveCost(current, neighbor);
                 if (tentativeG < gScore.getOrDefault(neighbor, Double.MAX_VALUE)) {
-                    // Encontramos un camino mejor (o el primero) hacia neighbor.
                     cameFrom.put(neighbor, current);
                     gScore.put(neighbor, tentativeG);
-                    double f = tentativeG + heuristic(neighbor, target);
-                    open.add(new OpenEntry(neighbor, f));
+                    open.add(new OpenEntry(neighbor, tentativeG + heuristic(neighbor, target)));
                 }
             }
         }
-        return List.of(); // no existe camino
+        return List.of();
+    }
+
+    /**
+     * Una celda está libre si el terreno la permite y ningún obstáculo
+     * dinámico (salvo el exento) la ocupa.
+     */
+    private boolean isFree(GameGrid grid, DynamicObstacles obstacles,
+                            Cell cell, String exemptId) {
+        return grid.isWalkable(cell.col(), cell.row())
+                && !obstacles.isBlocked(cell, exemptId);
+    }
+
+    private List<Cell> freeNeighbors(GameGrid grid, DynamicObstacles obstacles,
+                                      Cell c, String exemptId) {
+        List<Cell> result = new ArrayList<>();
+        for (int dc = -1; dc <= 1; dc++) {
+            for (int dr = -1; dr <= 1; dr++) {
+                if (dc == 0 && dr == 0) {
+                    continue;
+                }
+                Cell n = new Cell(c.col() + dc, c.row() + dr);
+                if (!isFree(grid, obstacles, n, exemptId)) {
+                    continue;
+                }
+                // Sin corner cutting: en diagonal, ambas ortogonales deben estar libres
+                if (dc != 0 && dr != 0) {
+                    if (!isFree(grid, obstacles, new Cell(c.col() + dc, c.row()), exemptId)
+                            || !isFree(grid, obstacles, new Cell(c.col(), c.row() + dr), exemptId)) {
+                        continue;
+                    }
+                }
+                result.add(n);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Celda libre más cercana a una dada (BFS en anillo). Se usa cuando el
+     * destino está sobre un obstáculo: la unidad va al borde.
+     */
+    private Cell nearestFree(GameGrid grid, DynamicObstacles obstacles,
+                              Cell from, String exemptId) {
+        Queue<Cell> queue = new LinkedList<>();
+        Set<Cell> seen = new HashSet<>();
+        queue.add(from);
+        seen.add(from);
+        while (!queue.isEmpty()) {
+            Cell c = queue.poll();
+            if (isFree(grid, obstacles, c, exemptId)) {
+                return c;
+            }
+            for (int dc = -1; dc <= 1; dc++) {
+                for (int dr = -1; dr <= 1; dr++) {
+                    if (dc == 0 && dr == 0) {
+                        continue;
+                    }
+                    Cell n = new Cell(c.col() + dc, c.row() + dr);
+                    if (grid.inBounds(n.col(), n.row()) && seen.add(n)) {
+                        queue.add(n);
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     /**
