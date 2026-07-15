@@ -1,6 +1,7 @@
 package edu.eci.arsw.RoyalArena.model;
 
 import java.util.UUID;
+import java.util.List;
 
 import edu.eci.arsw.RoyalArena.model.enums.Team;
 import edu.eci.arsw.RoyalArena.model.enums.UnitState;
@@ -38,6 +39,13 @@ public class DeployedUnit {
 
     /** Cooldown restante en ms para el próximo ataque. */
     private volatile double attackCooldownMs;
+
+    private volatile List<Position> path;
+
+    /** Índice del waypoint actual dentro de path. */
+    private volatile int pathIndex;
+
+    private volatile String pathTargetId;
 
     public DeployedUnit(CardSnapshot card, Team team, Position spawnPosition) {
         this.instanceId = UUID.randomUUID().toString();
@@ -90,5 +98,20 @@ public class DeployedUnit {
 
     public boolean isDead() {
         return state == UnitState.DEAD;
+    }
+
+    public List<Position> getPath() { return path; }
+
+    public int getPathIndex() { return pathIndex; }
+
+    public void setPathIndex(int pathIndex) { this.pathIndex = pathIndex; }
+
+    public String getPathTargetId() { return pathTargetId; }
+
+    /** Asigna una ruta nueva para un objetivo y reinicia el índice. */
+    public void setPath(List<Position> path, String targetId) {
+        this.path = path;
+        this.pathIndex = 0;
+        this.pathTargetId = targetId;
     }
 }
