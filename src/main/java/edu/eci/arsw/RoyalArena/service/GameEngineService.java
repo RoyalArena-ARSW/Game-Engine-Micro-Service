@@ -25,7 +25,9 @@ import edu.eci.arsw.RoyalArena.model.CardSnapshot;
 import edu.eci.arsw.RoyalArena.model.DeployedUnit;
 import edu.eci.arsw.RoyalArena.model.GameConstants;
 import edu.eci.arsw.RoyalArena.model.GameMatch;
-
+import edu.eci.arsw.RoyalArena.model.Cell;
+import edu.eci.arsw.RoyalArena.pathfinding.AStarPathfinder;
+import edu.eci.arsw.RoyalArena.pathfinding.GameGrid;
 import edu.eci.arsw.RoyalArena.model.PlayerState;
 
 import edu.eci.arsw.RoyalArena.model.TowerState;
@@ -84,8 +86,16 @@ public class GameEngineService {
     @Value("${game.match.duration-seconds:180}")
     private double matchDurationSeconds;
 
-    public GameEngineService(SimpMessagingTemplate messagingTemplate) {
+    private final GameGrid gameGrid;
+    private final AStarPathfinder pathfinder;
+    private static final double WAYPOINT_REACHED_THRESHOLD = 0.5;
+
+    public GameEngineService(SimpMessagingTemplate messagingTemplate,
+                             GameGrid gameGrid,
+                             AStarPathfinder pathfinder) {
         this.messagingTemplate = messagingTemplate;
+        this.gameGrid = gameGrid;
+        this.pathfinder = pathfinder;
     }
 
     @PostConstruct
@@ -338,56 +348,64 @@ public class GameEngineService {
     }
 
     /**
-     * Por cada unidad viva: elegir objetivo, moverse hacia él o atacarlo.
+     * Por cada unidad viva: elegir objetivo. Si está en rango, atacar.
+     * Si no, moverse siguiendo la ruta A* (recalculada solo si el objetivo
+     * cambió).
      */
     private void updateUnits(GameMatch match, double deltaSeconds) {
         for (DeployedUnit unit : match.getUnits().values()) {
             if (unit.isDead()) continue;
 
             unit.reduceCooldown(tickIntervalMs);
+            final Position unitPos = unit.getPosition();
             Team enemyTeam = unit.getTeam().opposite();
 
-            // ¿Objetivo unidad enemiga más cercana? (si la carta puede atacarlas)
+            // Unidad enemiga más cercana (si la carta puede atacar unidades)
             DeployedUnit nearestEnemyUnit = null;
             if (!"BUILDINGS_ONLY".equals(unit.getCard().getTarget())) {
                 nearestEnemyUnit = match.getUnits().values().stream()
                         .filter(u -> u.getTeam() == enemyTeam && !u.isDead())
-                        .min(Comparator.comparingDouble(u -> u.getPosition().distanceTo(unit.getPosition())))
+                        .min(Comparator.comparingDouble(u -> u.getPosition().distanceTo(unitPos)))
                         .orElse(null);
             }
 
-            // Torre enemiga más cercana (siempre es objetivo válido)
+            // Torre enemiga más cercana
             TowerState nearestTower = match.getPlayersOf(enemyTeam).stream()
                     .flatMap(p -> p.getTowers().stream())
                     .filter(t -> !t.isDestroyed())
-                    .min(Comparator.comparingDouble(t -> t.getPosition().distanceTo(unit.getPosition())))
+                    .min(Comparator.comparingDouble(t -> t.getPosition().distanceTo(unitPos)))
                     .orElse(null);
 
-            // Elegir el más cercano entre unidad y torre
-            Position targetPos;
-            Runnable attackAction;
             double distToUnit = nearestEnemyUnit != null
-                    ? unit.getPosition().distanceTo(nearestEnemyUnit.getPosition()) : Double.MAX_VALUE;
+                    ? unitPos.distanceTo(nearestEnemyUnit.getPosition()) : Double.MAX_VALUE;
             double distToTower = nearestTower != null
-                    ? unit.getPosition().distanceTo(nearestTower.getPosition()) : Double.MAX_VALUE;
+                    ? unitPos.distanceTo(nearestTower.getPosition()) : Double.MAX_VALUE;
+
+            final int unitDamage = damageOf(unit);
+            Position targetPos;
+            String targetId;       // identidad estable del objetivo (para saber si cambió)
+            Runnable attackAction;
 
             if (distToUnit <= distToTower && nearestEnemyUnit != null) {
-                targetPos = nearestEnemyUnit.getPosition();
-                DeployedUnit target = nearestEnemyUnit;
-                attackAction = () -> target.applyDamage(damageOf(unit));
+                final DeployedUnit target = nearestEnemyUnit;
+                targetPos = target.getPosition();
+                targetId = "UNIT:" + target.getInstanceId();
+                attackAction = () -> target.applyDamage(unitDamage);
             } else if (nearestTower != null) {
-                targetPos = nearestTower.getPosition();
-                TowerState target = nearestTower;
-                attackAction = () -> target.applyDamage(damageOf(unit));
+                final TowerState target = nearestTower;
+                targetPos = target.getPosition();
+                targetId = "TOWER:" + target.getTeam() + ":" + target.getType();
+                attackAction = () -> target.applyDamage(unitDamage);
             } else {
-                continue; // Sin objetivos: partida a punto de terminar
+                continue; // sin objetivos
             }
 
             double range = unit.getCard().getAttackRange() != null
-                    ? Math.max(unit.getCard().getAttackRange(), 0.8) : 0.8; // melee ~0.8 tiles
-            double distance = unit.getPosition().distanceTo(targetPos);
+                    ? Math.max(unit.getCard().getAttackRange(), 0.8) : 0.8;
+            double distance = unitPos.distanceTo(targetPos);
 
             if (distance <= range) {
+                // En rango: atacar, sin moverse
                 unit.setState(UnitState.ATTACKING);
                 if (unit.canAttack()) {
                     attackAction.run();
@@ -396,14 +414,72 @@ public class GameEngineService {
                     unit.setAttackCooldownMs(cooldown);
                 }
             } else {
+                // Fuera de rango: moverse siguiendo A*
                 unit.setState(UnitState.MOVING);
-                unit.moveTowards(targetPos, deltaSeconds);
+
+                // Recalcular la ruta SOLO si el objetivo cambió
+                if (!targetId.equals(unit.getPathTargetId())) {
+                    Cell start = positionToCell(unitPos);
+                    Cell goal = positionToCell(targetPos);
+                    List<Cell> cells = pathfinder.findPath(gameGrid, start, goal);
+                    List<Position> waypoints = new ArrayList<>();
+                    for (Cell c : cells) {
+                        waypoints.add(cellCenter(c));
+                    }
+                    unit.setPath(waypoints, targetId);
+                }
+
+                followPath(unit, deltaSeconds, targetPos);
             }
         }
     }
 
     private int damageOf(DeployedUnit unit) {
         return unit.getCard().getDamage() != null ? unit.getCard().getDamage() : 0;
+    }
+
+    /**
+     * Mueve la unidad hacia el siguiente waypoint de su ruta A*, avanzando
+     * el índice a medida que alcanza cada punto. Si no hay ruta o se agotó,
+     * se aproxima en línea recta al objetivo (red de seguridad).
+     */
+    private void followPath(DeployedUnit unit, double deltaSeconds, Position finalTarget) {
+        List<Position> path = unit.getPath();
+        if (path == null || path.isEmpty()) {
+            unit.moveTowards(finalTarget, deltaSeconds);
+            return;
+        }
+
+        int idx = unit.getPathIndex();
+        // Saltar los waypoints que ya alcanzó
+        while (idx < path.size()
+                && unit.getPosition().distanceTo(path.get(idx)) < WAYPOINT_REACHED_THRESHOLD) {
+            idx++;
+        }
+        unit.setPathIndex(idx);
+
+        if (idx >= path.size()) {
+            // Ruta consumida: aproximación final directa al objetivo
+            unit.moveTowards(finalTarget, deltaSeconds);
+            return;
+        }
+        unit.moveTowards(path.get(idx), deltaSeconds);
+    }
+
+    /** Convierte una posición continua a la celda del grid que la contiene. */
+    private Cell positionToCell(Position pos) {
+        int col = clamp((int) Math.floor(pos.x()), 0, GameConstants.BOARD_WIDTH - 1);
+        int row = clamp((int) Math.floor(pos.y()), 0, GameConstants.BOARD_HEIGHT - 1);
+        return new Cell(col, row);
+    }
+
+    /** Centro de una celda como posición continua. */
+    private Position cellCenter(Cell cell) {
+        return new Position(cell.col() + 0.5, cell.row() + 0.5);
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     /**
