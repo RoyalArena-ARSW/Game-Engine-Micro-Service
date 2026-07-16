@@ -106,14 +106,22 @@
         }
 
         function connect() {
+            myUserId = getMyUserId();
             const socket = new SockJS('http://localhost:8084/ws-game');
             stompClient = Stomp.over(socket);
-            stompClient.debug = null; // silenciar logs internos de STOMP
+            stompClient.debug = null;
 
             stompClient.connect({}, function(frame) {
-                document.getElementById('connStatus').textContent = 'Conectado';
+                document.getElementById('connStatus').textContent = 'Conectado (user ' + myUserId + ')';
                 document.getElementById('connStatus').className = 'status connected';
-                log('✅ WebSocket conectado');
+                log('✅ WebSocket conectado como usuario ' + myUserId);
+
+                // Suscribirse a MI topic de matchmaking ANTES de buscar partida
+                stompClient.subscribe('/topic/matchmaking/' + myUserId, function(message) {
+                    onMatchFound(JSON.parse(message.body));
+                });
+                log('👂 Escuchando /topic/matchmaking/' + myUserId);
+
             }, function(error) {
                 document.getElementById('connStatus').textContent = 'Error';
                 document.getElementById('connStatus').className = 'status disconnected';
