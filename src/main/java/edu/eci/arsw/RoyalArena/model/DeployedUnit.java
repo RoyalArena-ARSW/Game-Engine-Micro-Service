@@ -100,6 +100,11 @@ public class DeployedUnit {
         return state == UnitState.DEAD;
     }
 
+    /** Versión de los obstáculos cuando se calculó la ruta actual. */
+    private volatile int pathObstaclesVersion = -1;
+
+    public int getPathObstaclesVersion() { return pathObstaclesVersion; }
+
     public List<Position> getPath() { return path; }
 
     public int getPathIndex() { return pathIndex; }
@@ -108,10 +113,19 @@ public class DeployedUnit {
 
     public String getPathTargetId() { return pathTargetId; }
 
-    /** Asigna una ruta nueva para un objetivo y reinicia el índice. */
-    public void setPath(List<Position> path, String targetId) {
+    /** Asigna una ruta nueva y recuerda para qué objetivo y con qué versión de obstáculos. */
+    public void setPath(List<Position> path, String targetId, int obstaclesVersion) {
         this.path = path;
         this.pathIndex = 0;
         this.pathTargetId = targetId;
+        this.pathObstaclesVersion = obstaclesVersion;
+    }
+
+    /**
+     * Reposiciona la unidad. Solo lo invoca la resolución de colisiones,
+     * desde el thread del game loop (single-writer).
+     */
+    public void setPosition(Position position) {
+        this.position = position;
     }
 }
