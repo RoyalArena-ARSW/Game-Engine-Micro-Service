@@ -168,6 +168,16 @@
             } catch (e) {
                 log('❌ Error al buscar partida: ' + e.message);
             }
+            const data = await res.json();
+                let msg = `🔍 Buscar partida → ${data.result}`;
+                if (data.result === 'NO_ACTIVE_DECK') {
+                    msg = '🚫 No tienes un mazo activo. Créalo en Deck-and-Cards primero.';
+                } else if (data.result === 'DECK_SERVICE_UNAVAILABLE') {
+                    msg = '⚠️ Deck-and-Cards no responde. ¿Está corriendo en el 8081?';
+                } else {
+                    msg += ` (en cola: ${data.queueSize})`;
+                }
+                log(msg);
         }
 
         async function leaveQueue() {

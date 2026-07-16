@@ -4,16 +4,26 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
+import edu.eci.arsw.RoyalArena.client.DeckAndCardsClient;
 import edu.eci.arsw.RoyalArena.dto.MatchFoundDTO;
+import edu.eci.arsw.RoyalArena.exception.DeckServiceUnavailableException;
+import edu.eci.arsw.RoyalArena.exception.NoActiveDeckException;
+import edu.eci.arsw.RoyalArena.model.CardSnapshot;
 import edu.eci.arsw.RoyalArena.model.GameMatch;
 import edu.eci.arsw.RoyalArena.model.WaitingPlayer;
 import edu.eci.arsw.RoyalArena.model.enums.JoinResult;
 import edu.eci.arsw.RoyalArena.model.enums.Team;
+import edu.eci.arsw.RoyalArena.client.DeckAndCardsClient;
+import edu.eci.arsw.RoyalArena.exception.DeckServiceUnavailableException;
+import edu.eci.arsw.RoyalArena.exception.NoActiveDeckException;
+import edu.eci.arsw.RoyalArena.model.CardSnapshot;
+import edu.eci.arsw.RoyalArena.model.WaitingPlayer;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -55,13 +65,15 @@ public class MatchmakingService {
 
     private final GameEngineService gameEngine;
     private final TestDataFactory testDataFactory;
+    private final DeckAndCardsClient deckClient;
     private final SimpMessagingTemplate messagingTemplate;
 
     public MatchmakingService(GameEngineService gameEngine,
-                              TestDataFactory testDataFactory,
+                              DeckAndCardsClient deckClient,
                               SimpMessagingTemplate messagingTemplate) {
         this.gameEngine = gameEngine;
-        this.testDataFactory = testDataFactory;
+        this.testDataFactory = new TestDataFactory();
+        this.deckClient = deckClient;
         this.messagingTemplate = messagingTemplate;
     }
 
@@ -70,6 +82,18 @@ public class MatchmakingService {
      * la partida. Si no, queda en cola.
      */
     public JoinResult joinQueue(Long userId) {
+        List<CardSnapshot> myDeck;
+        try {
+            myDeck = deckClient.fetchActiveDeck(userId);
+        } catch (NoActiveDeckException e) {
+            log.warn("User {} tried to queue without an active deck", userId);
+            return JoinResult.NO_ACTIVE_DECK;
+        } catch (DeckServiceUnavailableException e) {
+            log.error("Deck service unavailable for user {}: {}", userId, e.getMessage());
+            return JoinResult.DECK_SERVICE_UNAVAILABLE;
+        }
+
+        WaitingPlayer me = new WaitingPlayer(userId, myDeck, System.currentTimeMillis());
         WaitingPlayer opponent;
 
         // ===== SECCIÓN CRÍTICA: decidir emparejar o encolar =====
@@ -79,7 +103,7 @@ public class MatchmakingService {
             }
             opponent = pollValidOpponent();
             if (opponent == null) {
-                queue.addLast(new WaitingPlayer(userId, System.currentTimeMillis()));
+                queue.addLast(me);
                 queuedUsers.add(userId);
             }
         }
@@ -90,10 +114,10 @@ public class MatchmakingService {
             return JoinResult.QUEUED;
         }
 
-        // Lo pesado, fuera del lock
-        createAndNotify(opponent.userId(), userId);
+        createAndNotify(opponent, me);
         return JoinResult.MATCHED;
     }
+
 
     /**
      * Saca de la cola al primer jugador NO obsoleto, descartando fantasmas.
@@ -153,16 +177,17 @@ public class MatchmakingService {
      * ticks es inofensivo: cada tick emite el estado COMPLETO (no deltas), así
      * que el primer snapshot que reciban ya trae todo.
      */
-    private void createAndNotify(Long userA, Long userB) {
+    private void createAndNotify(WaitingPlayer playerA, WaitingPlayer playerB) {
         GameMatch match = gameEngine.createMatch(
-                userA, testDataFactory.buildTestDeck(),
-                userB, testDataFactory.buildTestDeck());
+                playerA.userId(), playerA.deck(),
+                playerB.userId(), playerB.deck());
 
-        notifyPlayer(userA, match.getMatchId(), userB, Team.TEAM_A);
-        notifyPlayer(userB, match.getMatchId(), userA, Team.TEAM_B);
+        notifyPlayer(playerA.userId(), match.getMatchId(), playerB.userId(), Team.TEAM_A);
+        notifyPlayer(playerB.userId(), match.getMatchId(), playerA.userId(), Team.TEAM_B);
 
         gameEngine.startMatch(match.getMatchId());
-        log.info("Matchmaking paired {} vs {} → match {}", userA, userB, match.getMatchId());
+        log.info("Matchmaking paired {} vs {} → match {}",
+                playerA.userId(), playerB.userId(), match.getMatchId());
     }
 
     private void notifyPlayer(Long userId, String matchId, Long opponentId, Team team) {
