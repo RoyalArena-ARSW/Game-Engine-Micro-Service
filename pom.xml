@@ -47,17 +47,12 @@
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
 
-        <!--
-            RabbitMQ para eventos de partida (Fase 4).
-            Comentada por ahora para no requerir RabbitMQ corriendo en local.
-            La activamos cuando lleguemos a la integración.
-        -->
-        <!--
+    
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-amqp</artifactId>
         </dependency>
-        -->
+
 
         <!-- Lombok -->
         <dependency>
