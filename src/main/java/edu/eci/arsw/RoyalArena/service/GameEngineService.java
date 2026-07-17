@@ -461,12 +461,16 @@ public class GameEngineService {
      */
     private void resolveUnitCollisions(GameMatch match) {
         List<DeployedUnit> units = new ArrayList<>(match.getUnits().values());
-
+        
         for (int i = 0; i < units.size(); i++) {
             for (int j = i + 1; j < units.size(); j++) {
                 DeployedUnit a = units.get(i);
                 DeployedUnit b = units.get(j);
                 if (a.isDead() || b.isDead()) continue;
+
+                // Solo colisionan unidades del MISMO plano: las aéreas vuelan
+                // por encima de las terrestres (y de los edificios).
+                if (isAerialUnit(a) != isAerialUnit(b)) continue;
 
                 boolean aStatic = "BUILDING".equals(a.getCard().getType());
                 boolean bStatic = "BUILDING".equals(b.getCard().getType());
