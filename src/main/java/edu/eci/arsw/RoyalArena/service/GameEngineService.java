@@ -343,29 +343,30 @@ public class GameEngineService {
 
     // ==================== Unidades: targeting, A*, combate ====================
 
-    /**
-     * Por cada unidad viva: elegir objetivo, atacar si está en rango (medido al
-     * BORDE del objetivo), o moverse siguiendo la ruta A* (recalculada solo si
-     * cambió el objetivo o los obstáculos).
+/**
+     * Por cada unidad viva: elegir objetivo válido (respetando aire/tierra),
+     * atacar si está en rango, o moverse. Las unidades terrestres siguen la
+     * ruta A*; las aéreas vuelan en línea recta ignorando el terreno.
      */
     private void updateUnits(GameMatch match, double deltaSeconds) {
         for (DeployedUnit unit : match.getUnits().values()) {
             if (unit.isDead()) continue;
 
             boolean isBuilding = "BUILDING".equals(unit.getCard().getType());
+            boolean isAerial = isAerialUnit(unit);
 
             unit.reduceCooldown(tickIntervalMs);
             final Position unitPos = unit.getPosition();
             Team enemyTeam = unit.getTeam().opposite();
 
-            DeployedUnit nearestEnemyUnit = null;
-            if (!"BUILDINGS_ONLY".equals(unit.getCard().getTarget())) {
-                nearestEnemyUnit = match.getUnits().values().stream()
-                        .filter(u -> u.getTeam() == enemyTeam && !u.isDead())
-                        .min(Comparator.comparingDouble(u -> u.getPosition().distanceTo(unitPos)))
-                        .orElse(null);
-            }
+            // Enemigo más cercano que ESTA unidad pueda atacar
+            DeployedUnit nearestEnemyUnit = match.getUnits().values().stream()
+                    .filter(u -> u.getTeam() == enemyTeam && !u.isDead())
+                    .filter(u -> canTarget(unit, u))
+                    .min(Comparator.comparingDouble(u -> u.getPosition().distanceTo(unitPos)))
+                    .orElse(null);
 
+            // Las torres son objetivo válido para todos
             TowerState nearestTower = match.getPlayersOf(enemyTeam).stream()
                     .flatMap(p -> p.getTowers().stream())
                     .filter(t -> !t.isDestroyed())
@@ -413,7 +414,16 @@ public class GameEngineService {
                             ? unit.getCard().getAttackSpeed() * 1000 : 1000;
                     unit.setAttackCooldownMs(cooldown);
                 }
-            } else if (!isBuilding) {
+            } else if (isBuilding) {
+                // Edificio sin nada en rango: se queda quieto
+                unit.setState(UnitState.MOVING);
+            } else if (isAerial) {
+                // VUELA: ignora el río, las torres y todo el terreno.
+                // Sin A*: línea recta al objetivo. Más barato y más correcto.
+                unit.setState(UnitState.MOVING);
+                unit.moveTowards(targetPos, deltaSeconds);
+            } else {
+                // Terrestre: sigue la ruta A*
                 unit.setState(UnitState.MOVING);
 
                 int currentVersion = match.getObstacles().getVersion();
@@ -423,7 +433,6 @@ public class GameEngineService {
                 if (targetChanged || obstaclesChanged) {
                     Cell start = positionToCell(unitPos);
                     Cell goal = positionToCell(targetPos);
-                    // El objetivo queda EXENTO: su propio blanco no debe bloquearle la ruta
                     List<Cell> cells = pathfinder.findPath(
                             gameGrid, match.getObstacles(), start, goal, targetId);
                     List<Position> waypoints = new ArrayList<>();
@@ -434,9 +443,6 @@ public class GameEngineService {
                 }
 
                 followPath(unit, deltaSeconds, targetPos);
-            } else {
-                // Edificio sin nada en rango: se queda quieto
-                unit.setState(UnitState.MOVING);
             }
         }
 
@@ -742,6 +748,34 @@ public class GameEngineService {
 
     private int damageOf(DeployedUnit unit) {
         return unit.getCard().getDamage() != null ? unit.getCard().getDamage() : 0;
+    }
+
+    /** ¿La unidad vuela? Los hechizos y edificios nunca. */
+    private boolean isAerialUnit(DeployedUnit unit) {
+        return Boolean.TRUE.equals(unit.getCard().getIsAerial());
+    }
+
+    /**
+     * ¿El atacante puede atacar a ese objetivo?
+     *
+     *  - BUILDINGS_ONLY: solo edificios (un Giant ignora tropas, pero SÍ pega
+     *    a un Cannon enemigo).
+     *  - GROUND: solo objetivos terrestres. Los edificios cuentan como
+     *    terrestres.
+     *  - AIR_AND_GROUND (o null): todo.
+     */
+    private boolean canTarget(DeployedUnit attacker, DeployedUnit target) {
+        String targetType = attacker.getCard().getTarget();
+        boolean targetIsBuilding = "BUILDING".equals(target.getCard().getType());
+        boolean targetIsAerial = isAerialUnit(target);
+
+        if ("BUILDINGS_ONLY".equals(targetType)) {
+            return targetIsBuilding;
+        }
+        if ("GROUND".equals(targetType)) {
+            return !targetIsAerial;
+        }
+        return true;
     }
 
     /** Identidad estable de una torre: id de obstáculo y de objetivo. */
