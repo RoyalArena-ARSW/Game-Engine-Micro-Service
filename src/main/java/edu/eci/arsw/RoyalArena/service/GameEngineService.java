@@ -14,6 +14,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
+import edu.eci.arsw.RoyalArena.events.MatchEventPublisher;
+import edu.eci.arsw.RoyalArena.events.MatchFinishedEvent;
 import edu.eci.arsw.RoyalArena.dto.ActionErrorDTO;
 import edu.eci.arsw.RoyalArena.dto.MatchSnapshotDTO;
 import edu.eci.arsw.RoyalArena.dto.PlayerSnapshotDTO;
@@ -77,6 +79,9 @@ public class GameEngineService {
 
     private ScheduledExecutorService scheduler;
 
+    private final MatchEventPublisher eventPublisher;
+    private final RewardCalculator rewardCalculator;
+
     @Value("${game.engine.thread-pool-size:4}")
     private int threadPoolSize;
 
@@ -88,10 +93,14 @@ public class GameEngineService {
 
     public GameEngineService(SimpMessagingTemplate messagingTemplate,
                              GameGrid gameGrid,
-                             AStarPathfinder pathfinder) {
+                             AStarPathfinder pathfinder,
+                             MatchEventPublisher eventPublisher,
+                             RewardCalculator rewardCalculator) {
         this.messagingTemplate = messagingTemplate;
         this.gameGrid = gameGrid;
         this.pathfinder = pathfinder;
+        this.eventPublisher = eventPublisher;
+        this.rewardCalculator = rewardCalculator;
     }
 
     @PostConstruct
@@ -629,8 +638,55 @@ public class GameEngineService {
         log.info("Match {} finished. Winner: {}", match.getMatchId(),
                 winner != null ? winner : "DRAW");
 
-        // Fase 4: aquí se publicará MatchFinishedEvent a RabbitMQ.
         broadcastState(match);
+
+         eventPublisher.publishMatchFinished(buildMatchFinishedEvent(match, winner));
+    }
+
+    /**
+     * Arma el evento de fin de partida con el resultado de cada jugador.
+     *
+     * Las coronas: las que un jugador GANA son las torres que perdió su rival.
+     * Un three-crown win es ganar habiendo destruido las 3.
+     */
+    private MatchFinishedEvent buildMatchFinishedEvent(GameMatch match, Team winner) {
+        List<MatchFinishedEvent.PlayerResult> results = new ArrayList<>();
+        boolean isDraw = (winner == null);
+
+        for (Team team : Team.values()) {
+            Team rival = team.opposite();
+
+            int conceded = (int) match.getPlayersOf(team).stream()
+                    .mapToLong(PlayerState::countDestroyedTowers).sum();
+            int earned = (int) match.getPlayersOf(rival).stream()
+                    .mapToLong(PlayerState::countDestroyedTowers).sum();
+
+            boolean won = !isDraw && team == winner;
+            boolean threeCrown = won && earned >= 3;
+
+            for (PlayerState player : match.getPlayersOf(team)) {
+                results.add(new MatchFinishedEvent.PlayerResult(
+                        player.getUserId(),
+                        team.name(),
+                        won,
+                        isDraw,
+                        earned,
+                        conceded,
+                        threeCrown,
+                        rewardCalculator.trophyChange(won, isDraw),
+                        rewardCalculator.experienceGained(won, isDraw)
+                ));
+            }
+        }
+
+        double played = matchDurationSeconds - Math.max(0, match.getRemainingSeconds());
+
+        return new MatchFinishedEvent(
+                match.getMatchId(),
+                winner != null ? winner.name() : null,
+                played,
+                System.currentTimeMillis(),
+                results);
     }
 
     // ==================== Snapshots y emisión ====================
