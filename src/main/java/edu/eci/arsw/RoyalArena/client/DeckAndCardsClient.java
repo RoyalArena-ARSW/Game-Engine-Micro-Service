@@ -99,6 +99,7 @@ public class DeckAndCardsClient {
                 .duration(dto.duration())
                 .lifetimeSeconds(dto.lifetimeSeconds())
                 .selfDamagePerSecond(dto.selfDamagePerSecond())
+                .splashRadius(dto.splashRadius())
                 .build();
     }
 

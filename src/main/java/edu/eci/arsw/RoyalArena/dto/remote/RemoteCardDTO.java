@@ -36,5 +36,6 @@ public record RemoteCardDTO(
 
         // Edificios
         Integer lifetimeSeconds,
-        Double selfDamagePerSecond
+        Double selfDamagePerSecond,
+        Double splashRadius
 ) { }

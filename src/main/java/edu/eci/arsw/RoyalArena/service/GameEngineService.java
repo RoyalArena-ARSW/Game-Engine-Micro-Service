@@ -343,10 +343,10 @@ public class GameEngineService {
 
     // ==================== Unidades: targeting, A*, combate ====================
 
-/**
+    /**
      * Por cada unidad viva: elegir objetivo válido (respetando aire/tierra),
-     * atacar si está en rango, o moverse. Las unidades terrestres siguen la
-     * ruta A*; las aéreas vuelan en línea recta ignorando el terreno.
+     * atacar si está en rango (con daño en área si la carta lo tiene), o moverse
+     * (terrestres por A*, aéreas en línea recta).
      */
     private void updateUnits(GameMatch match, double deltaSeconds) {
         for (DeployedUnit unit : match.getUnits().values()) {
@@ -359,14 +359,14 @@ public class GameEngineService {
             final Position unitPos = unit.getPosition();
             Team enemyTeam = unit.getTeam().opposite();
 
-            // Enemigo más cercano que ESTA unidad pueda atacar
+            // Enemigo más cercano que ESTA unidad pueda atacar (respeta aire/tierra)
             DeployedUnit nearestEnemyUnit = match.getUnits().values().stream()
                     .filter(u -> u.getTeam() == enemyTeam && !u.isDead())
                     .filter(u -> canTarget(unit, u))
                     .min(Comparator.comparingDouble(u -> u.getPosition().distanceTo(unitPos)))
                     .orElse(null);
 
-            // Las torres son objetivo válido para todos
+            // Torre enemiga más cercana (objetivo válido para todos)
             TowerState nearestTower = match.getPlayersOf(enemyTeam).stream()
                     .flatMap(p -> p.getTowers().stream())
                     .filter(t -> !t.isDestroyed())
@@ -381,35 +381,48 @@ public class GameEngineService {
                     ? unitPos.distanceTo(nearestTower.getPosition()) - towerRadius(nearestTower)
                     : Double.MAX_VALUE;
 
-            final int unitDamage = damageOf(unit);
+            // Elegir objetivo: guardamos su posición y su referencia concreta
             Position targetPos;
             String targetId;
-            Runnable attackAction;
             double effectiveDistance;
+            DeployedUnit targetUnit = null;   // no-null si el objetivo es una unidad
+            TowerState targetTower = null;    // no-null si el objetivo es una torre
 
             if (distToUnit <= distToTower && nearestEnemyUnit != null) {
-                final DeployedUnit target = nearestEnemyUnit;
-                targetPos = target.getPosition();
-                targetId = unitObstacleId(target);
-                attackAction = () -> target.applyDamage(unitDamage);
+                targetUnit = nearestEnemyUnit;
+                targetPos = targetUnit.getPosition();
+                targetId = unitObstacleId(targetUnit);
                 effectiveDistance = distToUnit;
             } else if (nearestTower != null) {
-                final TowerState target = nearestTower;
-                targetPos = target.getPosition();
-                targetId = towerId(target);
-                attackAction = () -> target.applyDamage(unitDamage);
+                targetTower = nearestTower;
+                targetPos = targetTower.getPosition();
+                targetId = towerId(targetTower);
                 effectiveDistance = distToTower;
             } else {
-                continue;
+                continue; // sin objetivos
             }
 
             double range = unit.getCard().getAttackRange() != null
                     ? Math.max(unit.getCard().getAttackRange(), 0.8) : 0.8;
 
             if (effectiveDistance <= range) {
+                // EN RANGO: atacar
                 unit.setState(UnitState.ATTACKING);
                 if (unit.canAttack()) {
-                    attackAction.run();
+                    int dmg = damageOf(unit);
+
+                    // Daño al objetivo principal
+                    if (targetUnit != null) {
+                        targetUnit.applyDamage(dmg);
+                    } else {
+                        targetTower.applyDamage(dmg);
+                    }
+
+                    // Daño en área a los enemigos alrededor del impacto (si aplica).
+                    // targetUnit puede ser null si el objetivo era una torre: en ese
+                    // caso el splash igual golpea a las unidades cercanas a la torre.
+                    applySplashDamage(match, unit, targetPos, dmg, targetUnit);
+
                     double cooldown = unit.getCard().getAttackSpeed() != null
                             ? unit.getCard().getAttackSpeed() * 1000 : 1000;
                     unit.setAttackCooldownMs(cooldown);
@@ -418,12 +431,11 @@ public class GameEngineService {
                 // Edificio sin nada en rango: se queda quieto
                 unit.setState(UnitState.MOVING);
             } else if (isAerial) {
-                // VUELA: ignora el río, las torres y todo el terreno.
-                // Sin A*: línea recta al objetivo. Más barato y más correcto.
+                // VUELA: línea recta al objetivo, ignora río, torres y terreno
                 unit.setState(UnitState.MOVING);
                 unit.moveTowards(targetPos, deltaSeconds);
             } else {
-                // Terrestre: sigue la ruta A*
+                // TERRESTRE: sigue la ruta A*
                 unit.setState(UnitState.MOVING);
 
                 int currentVersion = match.getObstacles().getVersion();
@@ -433,6 +445,7 @@ public class GameEngineService {
                 if (targetChanged || obstaclesChanged) {
                     Cell start = positionToCell(unitPos);
                     Cell goal = positionToCell(targetPos);
+                    // El objetivo queda EXENTO: su propio blanco no le bloquea la ruta
                     List<Cell> cells = pathfinder.findPath(
                             gameGrid, match.getObstacles(), start, goal, targetId);
                     List<Position> waypoints = new ArrayList<>();
@@ -446,6 +459,7 @@ public class GameEngineService {
             }
         }
 
+        // Después de mover todo: resolver solapamientos
         resolveUnitCollisions(match);
     }
 
@@ -753,6 +767,28 @@ public class GameEngineService {
     private int damageOf(DeployedUnit unit) {
         return unit.getCard().getDamage() != null ? unit.getCard().getDamage() : 0;
     }
+
+    /**
+     * Aplica daño en área alrededor del punto de impacto, a los enemigos que NO
+     * sean el objetivo principal (ese ya recibió su daño). Solo afecta unidades,
+     * no torres. Sin efecto si la carta no tiene splashRadius.
+     */
+    private void applySplashDamage(GameMatch match, DeployedUnit attacker,
+                                    Position impactPoint, int damage,
+                                    DeployedUnit primaryTarget) {
+        Double splash = attacker.getCard().getSplashRadius();
+        if (splash == null || splash <= 0) return;
+
+        Team enemyTeam = attacker.getTeam().opposite();
+        for (DeployedUnit unit : match.getUnits().values()) {
+            if (unit.getTeam() != enemyTeam || unit.isDead()) continue;
+            if (unit == primaryTarget) continue; // ya recibió su daño
+            if (unit.getPosition().distanceTo(impactPoint) <= splash) {
+                unit.applyDamage(damage);
+            }
+        }
+    }
+
 
     /** ¿La unidad vuela? Los hechizos y edificios nunca. */
     private boolean isAerialUnit(DeployedUnit unit) {
