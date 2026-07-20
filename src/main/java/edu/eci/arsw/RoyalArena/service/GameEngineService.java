@@ -16,7 +16,9 @@ import org.springframework.stereotype.Service;
 
 import edu.eci.arsw.RoyalArena.events.MatchEventPublisher;
 import edu.eci.arsw.RoyalArena.events.MatchFinishedEvent;
+import edu.eci.arsw.RoyalArena.events.ReplayPacket;
 import edu.eci.arsw.RoyalArena.dto.ActionErrorDTO;
+import edu.eci.arsw.RoyalArena.dto.LiveMatchDTO;
 import edu.eci.arsw.RoyalArena.dto.MatchSnapshotDTO;
 import edu.eci.arsw.RoyalArena.dto.PlayerSnapshotDTO;
 import edu.eci.arsw.RoyalArena.dto.TowerSnapshotDTO;
@@ -91,6 +93,9 @@ public class GameEngineService {
     @Value("${game.match.duration-seconds:180}")
     private double matchDurationSeconds;
 
+    @Value("${game.replay.snapshot-every-ticks:10}")
+    private int replaySnapshotEveryTicks;
+
     public GameEngineService(SimpMessagingTemplate messagingTemplate,
                              GameGrid gameGrid,
                              AStarPathfinder pathfinder,
@@ -125,7 +130,7 @@ public class GameEngineService {
                                  Long userB, List<CardSnapshot> deckB) {
         PlayerState playerA = new PlayerState(userA, Team.TEAM_A, deckA);
         PlayerState playerB = new PlayerState(userB, Team.TEAM_B, deckB);
-        GameMatch match = new GameMatch(playerA, playerB, matchDurationSeconds);
+        GameMatch match = new GameMatch(playerA, playerB, matchDurationSeconds, replaySnapshotEveryTicks);
 
         registerTowerObstacles(match);
 
@@ -185,7 +190,7 @@ public class GameEngineService {
         }
     }
 
-    void tick(String matchId) {
+    private void tick(String matchId) {
         GameMatch match = activeMatches.get(matchId);
         if (match == null || !match.isInProgress()) {
             return;
@@ -193,32 +198,37 @@ public class GameEngineService {
 
         double deltaSeconds = tickIntervalMs / 1000.0;
 
-        // 1. Acciones encoladas de los jugadores
+        // 0. Avanzar el contador de ticks del grabador de replay
+        match.getReplayRecorder().onTick();
+
+        // 1. Procesar acciones encoladas de los jugadores
         processPendingActions(match);
 
-        // 2. Elixir
+        // 2. Regenerar elixir de todos los jugadores
         match.getPlayersByTeam().values().stream()
                 .flatMap(List::stream)
                 .forEach(p -> p.regenerateElixir(deltaSeconds));
 
-        // 3. Unidades: targeting, movimiento (A*), combate, colisiones
+        // 3. Actualizar unidades: targeting, movimiento, combate
         updateUnits(match, deltaSeconds);
 
-        // 4. Torres atacan
+        // 4. Torres atacan unidades enemigas en rango
         updateTowers(match);
 
-        // 5. Liberar celdas de torres destruidas
-        releaseDestroyedTowers(match);
+        // 5. Remover unidades muertas
+        match.getUnits().values().removeIf(DeployedUnit::isDead);
 
-        // 6. Remover unidades muertas (liberando obstáculos si eran edificios)
-        removeDeadUnits(match);
-
-        // 7. Tiempo y fin de partida
+        // 6. Descontar tiempo y chequear condiciones de fin
         match.setRemainingSeconds(match.getRemainingSeconds() - deltaSeconds);
         checkVictoryConditions(match);
 
-        // 8. Emitir estado a los clientes
-        broadcastState(match);
+        // 7. Construir el snapshot UNA sola vez y usarlo para DOS cosas:
+        //    emitirlo en vivo por WebSocket, y ofrecerlo al grabador de replay
+        //    (que lo guarda solo cada N ticks). Se construye una vez para no
+        //    armar el mismo snapshot dos veces por tick.
+        MatchSnapshotDTO snapshot = buildSnapshot(match.getMatchId());
+        messagingTemplate.convertAndSend("/topic/match/" + match.getMatchId(), snapshot);
+        match.getReplayRecorder().maybeRecordSnapshot(snapshot);
     }
 
     // ==================== Acciones de jugadores ====================
@@ -664,7 +674,34 @@ public class GameEngineService {
 
         broadcastState(match);
 
-         eventPublisher.publishMatchFinished(buildMatchFinishedEvent(match, winner));
+        eventPublisher.publishMatchFinished(buildMatchFinishedEvent(match, winner));
+        eventPublisher.publishReplay(buildReplayPacket(match, winner));
+    }
+
+    /**
+     * Arma el paquete de replay con todo lo grabado durante la partida.
+     */
+    private ReplayPacket buildReplayPacket(GameMatch match, Team winner) {
+        List<PlayerState> teamA = match.getPlayersOf(Team.TEAM_A);
+        List<PlayerState> teamB = match.getPlayersOf(Team.TEAM_B);
+        PlayerState a = teamA.get(0);
+        PlayerState b = teamB.get(0);
+
+        int crownsA = (int) teamB.stream().mapToLong(PlayerState::countDestroyedTowers).sum();
+        int crownsB = (int) teamA.stream().mapToLong(PlayerState::countDestroyedTowers).sum();
+
+        double played = matchDurationSeconds - Math.max(0, match.getRemainingSeconds());
+
+        return new ReplayPacket(
+                match.getMatchId(),
+                a.getUserId(), "Jugador " + a.getUserId(),
+                b.getUserId(), "Jugador " + b.getUserId(),
+                winner != null ? winner.name() : null,
+                crownsA, crownsB,
+                played,
+                System.currentTimeMillis(),
+                match.getReplayRecorder().getCardsPlayed(),
+                match.getReplayRecorder().getSnapshots());
     }
 
     /**
@@ -855,5 +892,35 @@ public class GameEngineService {
 
     private int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    /**
+     * Lista las partidas actualmente en curso, para la TV Royale.
+     * Solo las que están IN_PROGRESS (no las que esperan o terminaron).
+     */
+    public List<LiveMatchDTO> getActiveMatches() {
+        List<LiveMatchDTO> result = new ArrayList<>();
+        for (GameMatch match : activeMatches.values()) {
+            if (!match.isInProgress()) continue;
+
+            List<PlayerState> teamA = match.getPlayersOf(Team.TEAM_A);
+            List<PlayerState> teamB = match.getPlayersOf(Team.TEAM_B);
+            if (teamA.isEmpty() || teamB.isEmpty()) continue;
+
+            PlayerState a = teamA.get(0);
+            PlayerState b = teamB.get(0);
+
+            // Coronas = torres del rival destruidas
+            int crownsA = (int) teamB.stream().mapToLong(PlayerState::countDestroyedTowers).sum();
+            int crownsB = (int) teamA.stream().mapToLong(PlayerState::countDestroyedTowers).sum();
+
+            result.add(new LiveMatchDTO(
+                    match.getMatchId(),
+                    a.getUserId(), "Jugador " + a.getUserId(),
+                    b.getUserId(), "Jugador " + b.getUserId(),
+                    Math.max(0, match.getRemainingSeconds()),
+                    crownsA, crownsB));
+        }
+        return result;
     }
 }

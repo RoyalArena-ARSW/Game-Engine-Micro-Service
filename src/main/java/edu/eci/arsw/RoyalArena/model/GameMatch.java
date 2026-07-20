@@ -59,7 +59,11 @@ public class GameMatch {
 
     private final long createdAtMs;
 
-    public GameMatch(PlayerState playerA, PlayerState playerB, double durationSeconds) {
+    /** Grabadora de replay de esta partida. */
+    private final ReplayRecorder replayRecorder;
+
+    public GameMatch(PlayerState playerA, PlayerState playerB, 
+        double durationSeconds, int snapshotEveryTicks) {
         this.matchId = UUID.randomUUID().toString();
         this.playersByTeam = Map.of(
                 Team.TEAM_A, List.of(playerA),
@@ -68,6 +72,7 @@ public class GameMatch {
         this.status = MatchStatus.WAITING;
         this.remainingSeconds = durationSeconds;
         this.createdAtMs = System.currentTimeMillis();
+        this.replayRecorder = new ReplayRecorder(snapshotEveryTicks); // snapshot every 60 ticks (1 second at 60 FPS)
     }
 
     /**

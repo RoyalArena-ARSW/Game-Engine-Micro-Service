@@ -20,13 +20,16 @@ public class MatchEventPublisher {
     private final RabbitTemplate rabbitTemplate;
     private final String exchange;
     private final String matchFinishedKey;
+    private final String replayKey;
 
     public MatchEventPublisher(RabbitTemplate rabbitTemplate,
                                @Value("${royalarena.events.exchange}") String exchange,
-                               @Value("${royalarena.events.routing-key.match-finished}") String matchFinishedKey) {
+                               @Value("${royalarena.events.routing-key.match-finished}") String matchFinishedKey,
+                               @Value("${royalarena.events.routing-key.replay}") String replayKey) {
         this.rabbitTemplate = rabbitTemplate;
         this.exchange = exchange;
         this.matchFinishedKey = matchFinishedKey;
+        this.replayKey = replayKey;
     }
 
     public void publishMatchFinished(MatchFinishedEvent event) {
@@ -37,6 +40,18 @@ public class MatchEventPublisher {
         } catch (Exception e) {
             log.error("Failed to publish MatchFinishedEvent for match {}: {}",
                     event.matchId(), e.getMessage());
+        }
+    }
+
+
+    public void publishReplay(ReplayPacket packet) {
+        try {
+            rabbitTemplate.convertAndSend(exchange, replayKey, packet);
+            log.info("Published ReplayPacket for match {} ({} snapshots, {} cards)",
+                    packet.matchId(), packet.snapshots().size(), packet.cardsPlayed().size());
+        } catch (Exception e) {
+            log.error("Failed to publish ReplayPacket for match {}: {}",
+                    packet.matchId(), e.getMessage());
         }
     }
 }
