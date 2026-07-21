@@ -46,8 +46,10 @@ public class ReplayRecorder {
      * le pasa el snapshot ya construido para no volver a armarlo.
      */
     public void maybeRecordSnapshot(MatchSnapshotDTO state) {
-        if (tickCounter % snapshotEveryTicks == 0) {
-            snapshots.add(new ReplayPacket.ReplaySnapshot(tickCounter, state));
+        if(snapshotEveryTicks != 0) {
+            if (tickCounter % snapshotEveryTicks == 0) {
+                snapshots.add(new ReplayPacket.ReplaySnapshot(tickCounter, state));
+            }
         }
     }
 
