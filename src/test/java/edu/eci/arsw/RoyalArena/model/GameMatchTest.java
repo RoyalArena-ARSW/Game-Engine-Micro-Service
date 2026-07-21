@@ -39,7 +39,7 @@ class GameMatchTest {
         match = new GameMatch(
                 new PlayerState(1L, Team.TEAM_A, deckOf8()),
                 new PlayerState(2L, Team.TEAM_B, deckOf8()),
-                180.0);
+                180.0, 60);
     }
 
     @Test
@@ -58,7 +58,7 @@ class GameMatchTest {
         GameMatch other = new GameMatch(
                 new PlayerState(3L, Team.TEAM_A, deckOf8()),
                 new PlayerState(4L, Team.TEAM_B, deckOf8()),
-                180.0);
+                180.0, 60);
         assertThat(match.getMatchId()).isNotEqualTo(other.getMatchId());
     }
 
@@ -151,7 +151,7 @@ class GameMatchTest {
         GameMatch other = new GameMatch(
                 new PlayerState(3L, Team.TEAM_A, deckOf8()),
                 new PlayerState(4L, Team.TEAM_B, deckOf8()),
-                180.0);
+                180.0, 60);
 
         match.getObstacles().addObstacle("X", new Position(9.5, 9.5), 1.5);
 

@@ -70,7 +70,7 @@ class MatchmakingServiceTest {
                     return new GameMatch(
                             new PlayerState(userA, Team.TEAM_A, dummyDeck()),
                             new PlayerState(userB, Team.TEAM_B, dummyDeck()),
-                            180.0);
+                            180.0, 60);
                 });
 
         matchmaking = new MatchmakingService(gameEngine, deckClient, messagingTemplate);

@@ -25,7 +25,7 @@ public class MatchEventPublisher {
     public MatchEventPublisher(RabbitTemplate rabbitTemplate,
                                @Value("${royalarena.events.exchange}") String exchange,
                                @Value("${royalarena.events.routing-key.match-finished}") String matchFinishedKey,
-                               @Value("${royalarena.events.routing-key.replay}") String replayKey) {
+                               @Value("${royalarena.events.routing-key.replay-recorded:replay.recorded}") String replayKey) {
         this.rabbitTemplate = rabbitTemplate;
         this.exchange = exchange;
         this.matchFinishedKey = matchFinishedKey;

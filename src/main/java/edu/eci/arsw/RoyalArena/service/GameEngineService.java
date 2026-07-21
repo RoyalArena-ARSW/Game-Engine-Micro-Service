@@ -190,7 +190,7 @@ public class GameEngineService {
         }
     }
 
-    private void tick(String matchId) {
+    public void tick(String matchId) {
         GameMatch match = activeMatches.get(matchId);
         if (match == null || !match.isInProgress()) {
             return;
