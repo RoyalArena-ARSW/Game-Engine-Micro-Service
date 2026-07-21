@@ -28,7 +28,7 @@ jobs:
       with:
         login-server: royalarenaregistry.azurecr.io
         username: ${{ secrets.AZURE_ACR_USERNAME }}
-        password: ${{ secrets.AZURE_ACR_PASSWORD }}
+        password: ${{ secrets.AZURE_ACR_PASSWORD }} 
 
     - name: Build and push Docker image
       run: |
