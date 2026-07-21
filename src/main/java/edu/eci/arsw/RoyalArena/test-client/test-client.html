@@ -26,10 +26,20 @@
     <div class="info">
         <span>Estado: </span><span id="connStatus" class="status disconnected">Desconectado</span>
         <br>
+        <label>Mi userId:</label>
+        <input type="number" id="myUserId" value="1" style="width:60px">
         <button onclick="connect()">1. Conectar WebSocket</button>
-        <button onclick="createMatch()">2. Crear partida de prueba</button>
-        <input type="text" id="matchIdInput" placeholder="matchId" style="width:280px">
-        <button onclick="subscribe()">3. Suscribirse a la partida</button>
+        <br>
+        <button onclick="joinQueue()">🔍 Buscar partida</button>
+        <button onclick="leaveQueue()">✖️ Cancelar búsqueda</button>
+        <span id="queueInfo" style="margin-left:12px;color:#888;"></span>
+        <br>
+        <details style="margin-top:8px;">
+            <summary style="cursor:pointer;color:#888;font-size:12px;">Modo manual (sin matchmaking)</summary>
+            <button onclick="createMatch()">Crear partida de prueba</button>
+            <input type="text" id="matchIdInput" placeholder="matchId" style="width:280px">
+            <button onclick="subscribe()">Suscribirse</button>
+        </details>
     </div>
 
     <div class="container">
@@ -75,6 +85,7 @@
         let stompClient = null;
         let currentMatchId = null;
         let lastSnapshot = null;
+        let myUserId = null;
 
         const canvas = document.getElementById('board');
         const ctx = canvas.getContext('2d');
@@ -95,14 +106,22 @@
         }
 
         function connect() {
+            myUserId = getMyUserId();
             const socket = new SockJS('http://localhost:8084/ws-game');
             stompClient = Stomp.over(socket);
-            stompClient.debug = null; // silenciar logs internos de STOMP
+            stompClient.debug = null;
 
             stompClient.connect({}, function(frame) {
-                document.getElementById('connStatus').textContent = 'Conectado';
+                document.getElementById('connStatus').textContent = 'Conectado (user ' + myUserId + ')';
                 document.getElementById('connStatus').className = 'status connected';
-                log('✅ WebSocket conectado');
+                log('✅ WebSocket conectado como usuario ' + myUserId);
+
+                // Suscribirse a MI topic de matchmaking ANTES de buscar partida
+                stompClient.subscribe('/topic/matchmaking/' + myUserId, function(message) {
+                    onMatchFound(JSON.parse(message.body));
+                });
+                log('👂 Escuchando /topic/matchmaking/' + myUserId);
+
             }, function(error) {
                 document.getElementById('connStatus').textContent = 'Error';
                 document.getElementById('connStatus').className = 'status disconnected';
@@ -124,6 +143,67 @@
             } catch (e) {
                 log('❌ Error creando partida: ' + e.message);
             }
+        }
+
+        function getMyUserId() {
+            return parseInt(document.getElementById('myUserId').value);
+        }
+
+        async function joinQueue() {
+            if (!stompClient || !stompClient.connected) {
+                log('⚠️ Conecta el WebSocket primero');
+                return;
+            }
+            const userId = getMyUserId();
+            try {
+                const res = await fetch('http://localhost:8084/api/matchmaking/join', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ userId: userId })
+                });
+                const data = await res.json();
+                log(`🔍 Buscar partida → ${data.result} (en cola: ${data.queueSize})`);
+                document.getElementById('queueInfo').textContent =
+                    data.result === 'QUEUED' ? 'Esperando oponente...' : '';
+            } catch (e) {
+                log('❌ Error al buscar partida: ' + e.message);
+            }
+            const data = await res.json();
+                let msg = `🔍 Buscar partida → ${data.result}`;
+                if (data.result === 'NO_ACTIVE_DECK') {
+                    msg = '🚫 No tienes un mazo activo. Créalo en Deck-and-Cards primero.';
+                } else if (data.result === 'DECK_SERVICE_UNAVAILABLE') {
+                    msg = '⚠️ Deck-and-Cards no responde. ¿Está corriendo en el 8081?';
+                } else {
+                    msg += ` (en cola: ${data.queueSize})`;
+                }
+                log(msg);
+        }
+
+        async function leaveQueue() {
+            const userId = getMyUserId();
+            try {
+                const res = await fetch('http://localhost:8084/api/matchmaking/leave', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ userId: userId })
+                });
+                const data = await res.json();
+                log(`✖️ Cancelar búsqueda → removido: ${data.removed}`);
+                document.getElementById('queueInfo').textContent = '';
+            } catch (e) {
+                log('❌ Error al cancelar: ' + e.message);
+            }
+        }
+
+        /** Se llama automáticamente cuando el matchmaking nos empareja. */
+        function onMatchFound(data) {
+            log(`🎮 ¡Partida encontrada! vs jugador ${data.opponentId} — eres ${data.yourTeam}`);
+            document.getElementById('queueInfo').textContent = '';
+            document.getElementById('matchIdInput').value = data.matchId;
+            // Preseleccionar nuestro jugador en el panel de jugar carta
+            document.getElementById('playerSelect').value = String(myUserId);
+            subscribe(); // suscribirse automáticamente al topic de la partida
         }
 
         function subscribe() {

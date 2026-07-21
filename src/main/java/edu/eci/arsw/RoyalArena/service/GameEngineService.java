@@ -14,7 +14,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
+import edu.eci.arsw.RoyalArena.events.MatchEventPublisher;
+import edu.eci.arsw.RoyalArena.events.MatchFinishedEvent;
+import edu.eci.arsw.RoyalArena.events.ReplayPacket;
 import edu.eci.arsw.RoyalArena.dto.ActionErrorDTO;
+import edu.eci.arsw.RoyalArena.dto.LiveMatchDTO;
 import edu.eci.arsw.RoyalArena.dto.MatchSnapshotDTO;
 import edu.eci.arsw.RoyalArena.dto.PlayerSnapshotDTO;
 import edu.eci.arsw.RoyalArena.dto.TowerSnapshotDTO;
@@ -77,6 +81,9 @@ public class GameEngineService {
 
     private ScheduledExecutorService scheduler;
 
+    private final MatchEventPublisher eventPublisher;
+    private final RewardCalculator rewardCalculator;
+
     @Value("${game.engine.thread-pool-size:4}")
     private int threadPoolSize;
 
@@ -86,12 +93,19 @@ public class GameEngineService {
     @Value("${game.match.duration-seconds:180}")
     private double matchDurationSeconds;
 
+    @Value("${game.replay.snapshot-every-ticks:10}")
+    private int replaySnapshotEveryTicks;
+
     public GameEngineService(SimpMessagingTemplate messagingTemplate,
                              GameGrid gameGrid,
-                             AStarPathfinder pathfinder) {
+                             AStarPathfinder pathfinder,
+                             MatchEventPublisher eventPublisher,
+                             RewardCalculator rewardCalculator) {
         this.messagingTemplate = messagingTemplate;
         this.gameGrid = gameGrid;
         this.pathfinder = pathfinder;
+        this.eventPublisher = eventPublisher;
+        this.rewardCalculator = rewardCalculator;
     }
 
     @PostConstruct
@@ -116,7 +130,7 @@ public class GameEngineService {
                                  Long userB, List<CardSnapshot> deckB) {
         PlayerState playerA = new PlayerState(userA, Team.TEAM_A, deckA);
         PlayerState playerB = new PlayerState(userB, Team.TEAM_B, deckB);
-        GameMatch match = new GameMatch(playerA, playerB, matchDurationSeconds);
+        GameMatch match = new GameMatch(playerA, playerB, matchDurationSeconds, replaySnapshotEveryTicks);
 
         registerTowerObstacles(match);
 
@@ -176,7 +190,7 @@ public class GameEngineService {
         }
     }
 
-    private void tick(String matchId) {
+    public void tick(String matchId) {
         GameMatch match = activeMatches.get(matchId);
         if (match == null || !match.isInProgress()) {
             return;
@@ -184,32 +198,37 @@ public class GameEngineService {
 
         double deltaSeconds = tickIntervalMs / 1000.0;
 
-        // 1. Acciones encoladas de los jugadores
+        // 0. Avanzar el contador de ticks del grabador de replay
+        match.getReplayRecorder().onTick();
+
+        // 1. Procesar acciones encoladas de los jugadores
         processPendingActions(match);
 
-        // 2. Elixir
+        // 2. Regenerar elixir de todos los jugadores
         match.getPlayersByTeam().values().stream()
                 .flatMap(List::stream)
                 .forEach(p -> p.regenerateElixir(deltaSeconds));
 
-        // 3. Unidades: targeting, movimiento (A*), combate, colisiones
+        // 3. Actualizar unidades: targeting, movimiento, combate
         updateUnits(match, deltaSeconds);
 
-        // 4. Torres atacan
+        // 4. Torres atacan unidades enemigas en rango
         updateTowers(match);
 
-        // 5. Liberar celdas de torres destruidas
-        releaseDestroyedTowers(match);
+        // 5. Remover unidades muertas
+        match.getUnits().values().removeIf(DeployedUnit::isDead);
 
-        // 6. Remover unidades muertas (liberando obstáculos si eran edificios)
-        removeDeadUnits(match);
-
-        // 7. Tiempo y fin de partida
+        // 6. Descontar tiempo y chequear condiciones de fin
         match.setRemainingSeconds(match.getRemainingSeconds() - deltaSeconds);
         checkVictoryConditions(match);
 
-        // 8. Emitir estado a los clientes
-        broadcastState(match);
+        // 7. Construir el snapshot UNA sola vez y usarlo para DOS cosas:
+        //    emitirlo en vivo por WebSocket, y ofrecerlo al grabador de replay
+        //    (que lo guarda solo cada N ticks). Se construye una vez para no
+        //    armar el mismo snapshot dos veces por tick.
+        MatchSnapshotDTO snapshot = buildSnapshot(match.getMatchId());
+        messagingTemplate.convertAndSend("/topic/match/" + match.getMatchId(), snapshot);
+        match.getReplayRecorder().maybeRecordSnapshot(snapshot);
     }
 
     // ==================== Acciones de jugadores ====================
@@ -335,28 +354,29 @@ public class GameEngineService {
     // ==================== Unidades: targeting, A*, combate ====================
 
     /**
-     * Por cada unidad viva: elegir objetivo, atacar si está en rango (medido al
-     * BORDE del objetivo), o moverse siguiendo la ruta A* (recalculada solo si
-     * cambió el objetivo o los obstáculos).
+     * Por cada unidad viva: elegir objetivo válido (respetando aire/tierra),
+     * atacar si está en rango (con daño en área si la carta lo tiene), o moverse
+     * (terrestres por A*, aéreas en línea recta).
      */
     private void updateUnits(GameMatch match, double deltaSeconds) {
         for (DeployedUnit unit : match.getUnits().values()) {
             if (unit.isDead()) continue;
 
             boolean isBuilding = "BUILDING".equals(unit.getCard().getType());
+            boolean isAerial = isAerialUnit(unit);
 
             unit.reduceCooldown(tickIntervalMs);
             final Position unitPos = unit.getPosition();
             Team enemyTeam = unit.getTeam().opposite();
 
-            DeployedUnit nearestEnemyUnit = null;
-            if (!"BUILDINGS_ONLY".equals(unit.getCard().getTarget())) {
-                nearestEnemyUnit = match.getUnits().values().stream()
-                        .filter(u -> u.getTeam() == enemyTeam && !u.isDead())
-                        .min(Comparator.comparingDouble(u -> u.getPosition().distanceTo(unitPos)))
-                        .orElse(null);
-            }
+            // Enemigo más cercano que ESTA unidad pueda atacar (respeta aire/tierra)
+            DeployedUnit nearestEnemyUnit = match.getUnits().values().stream()
+                    .filter(u -> u.getTeam() == enemyTeam && !u.isDead())
+                    .filter(u -> canTarget(unit, u))
+                    .min(Comparator.comparingDouble(u -> u.getPosition().distanceTo(unitPos)))
+                    .orElse(null);
 
+            // Torre enemiga más cercana (objetivo válido para todos)
             TowerState nearestTower = match.getPlayersOf(enemyTeam).stream()
                     .flatMap(p -> p.getTowers().stream())
                     .filter(t -> !t.isDestroyed())
@@ -371,40 +391,61 @@ public class GameEngineService {
                     ? unitPos.distanceTo(nearestTower.getPosition()) - towerRadius(nearestTower)
                     : Double.MAX_VALUE;
 
-            final int unitDamage = damageOf(unit);
+            // Elegir objetivo: guardamos su posición y su referencia concreta
             Position targetPos;
             String targetId;
-            Runnable attackAction;
             double effectiveDistance;
+            DeployedUnit targetUnit = null;   // no-null si el objetivo es una unidad
+            TowerState targetTower = null;    // no-null si el objetivo es una torre
 
             if (distToUnit <= distToTower && nearestEnemyUnit != null) {
-                final DeployedUnit target = nearestEnemyUnit;
-                targetPos = target.getPosition();
-                targetId = unitObstacleId(target);
-                attackAction = () -> target.applyDamage(unitDamage);
+                targetUnit = nearestEnemyUnit;
+                targetPos = targetUnit.getPosition();
+                targetId = unitObstacleId(targetUnit);
                 effectiveDistance = distToUnit;
             } else if (nearestTower != null) {
-                final TowerState target = nearestTower;
-                targetPos = target.getPosition();
-                targetId = towerId(target);
-                attackAction = () -> target.applyDamage(unitDamage);
+                targetTower = nearestTower;
+                targetPos = targetTower.getPosition();
+                targetId = towerId(targetTower);
                 effectiveDistance = distToTower;
             } else {
-                continue;
+                continue; // sin objetivos
             }
 
             double range = unit.getCard().getAttackRange() != null
                     ? Math.max(unit.getCard().getAttackRange(), 0.8) : 0.8;
 
             if (effectiveDistance <= range) {
+                // EN RANGO: atacar
                 unit.setState(UnitState.ATTACKING);
                 if (unit.canAttack()) {
-                    attackAction.run();
+                    int dmg = damageOf(unit);
+
+                    // Daño al objetivo principal
+                    if (targetUnit != null) {
+                        targetUnit.applyDamage(dmg);
+                    } else {
+                        targetTower.applyDamage(dmg);
+                    }
+
+                    // Daño en área a los enemigos alrededor del impacto (si aplica).
+                    // targetUnit puede ser null si el objetivo era una torre: en ese
+                    // caso el splash igual golpea a las unidades cercanas a la torre.
+                    applySplashDamage(match, unit, targetPos, dmg, targetUnit);
+
                     double cooldown = unit.getCard().getAttackSpeed() != null
                             ? unit.getCard().getAttackSpeed() * 1000 : 1000;
                     unit.setAttackCooldownMs(cooldown);
                 }
-            } else if (!isBuilding) {
+            } else if (isBuilding) {
+                // Edificio sin nada en rango: se queda quieto
+                unit.setState(UnitState.MOVING);
+            } else if (isAerial) {
+                // VUELA: línea recta al objetivo, ignora río, torres y terreno
+                unit.setState(UnitState.MOVING);
+                unit.moveTowards(targetPos, deltaSeconds);
+            } else {
+                // TERRESTRE: sigue la ruta A*
                 unit.setState(UnitState.MOVING);
 
                 int currentVersion = match.getObstacles().getVersion();
@@ -414,7 +455,7 @@ public class GameEngineService {
                 if (targetChanged || obstaclesChanged) {
                     Cell start = positionToCell(unitPos);
                     Cell goal = positionToCell(targetPos);
-                    // El objetivo queda EXENTO: su propio blanco no debe bloquearle la ruta
+                    // El objetivo queda EXENTO: su propio blanco no le bloquea la ruta
                     List<Cell> cells = pathfinder.findPath(
                             gameGrid, match.getObstacles(), start, goal, targetId);
                     List<Position> waypoints = new ArrayList<>();
@@ -425,12 +466,10 @@ public class GameEngineService {
                 }
 
                 followPath(unit, deltaSeconds, targetPos);
-            } else {
-                // Edificio sin nada en rango: se queda quieto
-                unit.setState(UnitState.MOVING);
             }
         }
 
+        // Después de mover todo: resolver solapamientos
         resolveUnitCollisions(match);
     }
 
@@ -446,12 +485,16 @@ public class GameEngineService {
      */
     private void resolveUnitCollisions(GameMatch match) {
         List<DeployedUnit> units = new ArrayList<>(match.getUnits().values());
-
+        
         for (int i = 0; i < units.size(); i++) {
             for (int j = i + 1; j < units.size(); j++) {
                 DeployedUnit a = units.get(i);
                 DeployedUnit b = units.get(j);
                 if (a.isDead() || b.isDead()) continue;
+
+                // Solo colisionan unidades del MISMO plano: las aéreas vuelan
+                // por encima de las terrestres (y de los edificios).
+                if (isAerialUnit(a) != isAerialUnit(b)) continue;
 
                 boolean aStatic = "BUILDING".equals(a.getCard().getType());
                 boolean bStatic = "BUILDING".equals(b.getCard().getType());
@@ -629,8 +672,82 @@ public class GameEngineService {
         log.info("Match {} finished. Winner: {}", match.getMatchId(),
                 winner != null ? winner : "DRAW");
 
-        // Fase 4: aquí se publicará MatchFinishedEvent a RabbitMQ.
         broadcastState(match);
+
+        eventPublisher.publishMatchFinished(buildMatchFinishedEvent(match, winner));
+        eventPublisher.publishReplay(buildReplayPacket(match, winner));
+    }
+
+    /**
+     * Arma el paquete de replay con todo lo grabado durante la partida.
+     */
+    private ReplayPacket buildReplayPacket(GameMatch match, Team winner) {
+        List<PlayerState> teamA = match.getPlayersOf(Team.TEAM_A);
+        List<PlayerState> teamB = match.getPlayersOf(Team.TEAM_B);
+        PlayerState a = teamA.get(0);
+        PlayerState b = teamB.get(0);
+
+        int crownsA = (int) teamB.stream().mapToLong(PlayerState::countDestroyedTowers).sum();
+        int crownsB = (int) teamA.stream().mapToLong(PlayerState::countDestroyedTowers).sum();
+
+        double played = matchDurationSeconds - Math.max(0, match.getRemainingSeconds());
+
+        return new ReplayPacket(
+                match.getMatchId(),
+                a.getUserId(), "Jugador " + a.getUserId(),
+                b.getUserId(), "Jugador " + b.getUserId(),
+                winner != null ? winner.name() : null,
+                crownsA, crownsB,
+                played,
+                System.currentTimeMillis(),
+                match.getReplayRecorder().getCardsPlayed(),
+                match.getReplayRecorder().getSnapshots());
+    }
+
+    /**
+     * Arma el evento de fin de partida con el resultado de cada jugador.
+     *
+     * Las coronas: las que un jugador GANA son las torres que perdió su rival.
+     * Un three-crown win es ganar habiendo destruido las 3.
+     */
+    private MatchFinishedEvent buildMatchFinishedEvent(GameMatch match, Team winner) {
+        List<MatchFinishedEvent.PlayerResult> results = new ArrayList<>();
+        boolean isDraw = (winner == null);
+
+        for (Team team : Team.values()) {
+            Team rival = team.opposite();
+
+            int conceded = (int) match.getPlayersOf(team).stream()
+                    .mapToLong(PlayerState::countDestroyedTowers).sum();
+            int earned = (int) match.getPlayersOf(rival).stream()
+                    .mapToLong(PlayerState::countDestroyedTowers).sum();
+
+            boolean won = !isDraw && team == winner;
+            boolean threeCrown = won && earned >= 3;
+
+            for (PlayerState player : match.getPlayersOf(team)) {
+                results.add(new MatchFinishedEvent.PlayerResult(
+                        player.getUserId(),
+                        team.name(),
+                        won,
+                        isDraw,
+                        earned,
+                        conceded,
+                        threeCrown,
+                        rewardCalculator.trophyChange(won, isDraw),
+                        rewardCalculator.experienceGained(won, isDraw)
+                ));
+            }
+        }
+
+        double played = matchDurationSeconds - Math.max(0, match.getRemainingSeconds());
+
+        return new MatchFinishedEvent(
+                match.getMatchId(),
+                winner != null ? winner.name() : null,
+                played,
+                System.currentTimeMillis(),
+                results);
     }
 
     // ==================== Snapshots y emisión ====================
@@ -688,6 +805,56 @@ public class GameEngineService {
         return unit.getCard().getDamage() != null ? unit.getCard().getDamage() : 0;
     }
 
+    /**
+     * Aplica daño en área alrededor del punto de impacto, a los enemigos que NO
+     * sean el objetivo principal (ese ya recibió su daño). Solo afecta unidades,
+     * no torres. Sin efecto si la carta no tiene splashRadius.
+     */
+    private void applySplashDamage(GameMatch match, DeployedUnit attacker,
+                                    Position impactPoint, int damage,
+                                    DeployedUnit primaryTarget) {
+        Double splash = attacker.getCard().getSplashRadius();
+        if (splash == null || splash <= 0) return;
+
+        Team enemyTeam = attacker.getTeam().opposite();
+        for (DeployedUnit unit : match.getUnits().values()) {
+            if (unit.getTeam() != enemyTeam || unit.isDead()) continue;
+            if (unit == primaryTarget) continue; // ya recibió su daño
+            if (unit.getPosition().distanceTo(impactPoint) <= splash) {
+                unit.applyDamage(damage);
+            }
+        }
+    }
+
+
+    /** ¿La unidad vuela? Los hechizos y edificios nunca. */
+    private boolean isAerialUnit(DeployedUnit unit) {
+        return Boolean.TRUE.equals(unit.getCard().getIsAerial());
+    }
+
+    /**
+     * ¿El atacante puede atacar a ese objetivo?
+     *
+     *  - BUILDINGS_ONLY: solo edificios (un Giant ignora tropas, pero SÍ pega
+     *    a un Cannon enemigo).
+     *  - GROUND: solo objetivos terrestres. Los edificios cuentan como
+     *    terrestres.
+     *  - AIR_AND_GROUND (o null): todo.
+     */
+    private boolean canTarget(DeployedUnit attacker, DeployedUnit target) {
+        String targetType = attacker.getCard().getTarget();
+        boolean targetIsBuilding = "BUILDING".equals(target.getCard().getType());
+        boolean targetIsAerial = isAerialUnit(target);
+
+        if ("BUILDINGS_ONLY".equals(targetType)) {
+            return targetIsBuilding;
+        }
+        if ("GROUND".equals(targetType)) {
+            return !targetIsAerial;
+        }
+        return true;
+    }
+
     /** Identidad estable de una torre: id de obstáculo y de objetivo. */
     private String towerId(TowerState tower) {
         return "TOWER:" + tower.getTeam() + ":" + tower.getType();
@@ -725,5 +892,35 @@ public class GameEngineService {
 
     private int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    /**
+     * Lista las partidas actualmente en curso, para la TV Royale.
+     * Solo las que están IN_PROGRESS (no las que esperan o terminaron).
+     */
+    public List<LiveMatchDTO> getActiveMatches() {
+        List<LiveMatchDTO> result = new ArrayList<>();
+        for (GameMatch match : activeMatches.values()) {
+            if (!match.isInProgress()) continue;
+
+            List<PlayerState> teamA = match.getPlayersOf(Team.TEAM_A);
+            List<PlayerState> teamB = match.getPlayersOf(Team.TEAM_B);
+            if (teamA.isEmpty() || teamB.isEmpty()) continue;
+
+            PlayerState a = teamA.get(0);
+            PlayerState b = teamB.get(0);
+
+            // Coronas = torres del rival destruidas
+            int crownsA = (int) teamB.stream().mapToLong(PlayerState::countDestroyedTowers).sum();
+            int crownsB = (int) teamA.stream().mapToLong(PlayerState::countDestroyedTowers).sum();
+
+            result.add(new LiveMatchDTO(
+                    match.getMatchId(),
+                    a.getUserId(), "Jugador " + a.getUserId(),
+                    b.getUserId(), "Jugador " + b.getUserId(),
+                    Math.max(0, match.getRemainingSeconds()),
+                    crownsA, crownsB));
+        }
+        return result;
     }
 }

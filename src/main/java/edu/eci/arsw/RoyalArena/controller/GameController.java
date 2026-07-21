@@ -1,5 +1,6 @@
 package edu.eci.arsw.RoyalArena.controller;
 
+import java.util.List;
 import java.util.Map;
 
 import org.springframework.http.HttpStatus;
@@ -11,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import edu.eci.arsw.RoyalArena.dto.LiveMatchDTO;
 import edu.eci.arsw.RoyalArena.dto.MatchSnapshotDTO;
 import edu.eci.arsw.RoyalArena.model.GameMatch;
 import edu.eci.arsw.RoyalArena.model.records.PlayerAction;
@@ -73,5 +75,13 @@ public class GameController {
     @GetMapping("/{matchId}")
     public ResponseEntity<MatchSnapshotDTO> getMatchState(@PathVariable String matchId) {
         return ResponseEntity.ok(gameEngine.buildSnapshot(matchId));
+    }
+    /**
+     * Lista de partidas en vivo para la TV Royale. Público: cualquiera puede
+     * ver qué se está jugando.
+     */
+    @GetMapping("/api/games/live")
+    public ResponseEntity<List<LiveMatchDTO>> getLiveMatches() {
+        return ResponseEntity.ok(gameEngine.getActiveMatches());
     }
 }

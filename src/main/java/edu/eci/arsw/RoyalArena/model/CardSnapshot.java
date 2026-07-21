@@ -45,4 +45,5 @@ public class CardSnapshot {
     // ----- Stats de estructuras -----
     private Integer lifetimeSeconds;
     private Double selfDamagePerSecond;
+    private Double splashRadius;
 }

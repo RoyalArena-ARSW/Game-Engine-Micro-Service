@@ -1,4 +1,4 @@
-name: Deploy Microservice to Azure Container Apps
+name: Deploy GameEngine to Azure Container Apps
 
 on:
   push:
