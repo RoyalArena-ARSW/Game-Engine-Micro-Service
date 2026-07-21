@@ -70,18 +70,20 @@ public class GameController {
     }
 
     /**
+     * Lista de partidas en vivo para la TV Royale. Público: cualquiera puede
+     * ver qué se está jugando.
+     */
+    @GetMapping("live")
+    public ResponseEntity<List<LiveMatchDTO>> getLiveMatches() {
+        return ResponseEntity.ok(gameEngine.getActiveMatches());
+    }
+
+    /**
      * Foto del estado actual de la partida.
      */
     @GetMapping("/{matchId}")
     public ResponseEntity<MatchSnapshotDTO> getMatchState(@PathVariable String matchId) {
         return ResponseEntity.ok(gameEngine.buildSnapshot(matchId));
     }
-    /**
-     * Lista de partidas en vivo para la TV Royale. Público: cualquiera puede
-     * ver qué se está jugando.
-     */
-    @GetMapping("/api/games/live")
-    public ResponseEntity<List<LiveMatchDTO>> getLiveMatches() {
-        return ResponseEntity.ok(gameEngine.getActiveMatches());
-    }
+
 }
